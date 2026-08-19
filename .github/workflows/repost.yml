@@ -1,0 +1,34 @@
+name: Instagram Reels Remix & Repost
+
+on:
+  schedule:
+    # 07:00 UTC ≈ 10:00 Türkiye saati (TR yıl boyunca UTC+3). Değiştirmek için crontab.guru kullanabilirsin.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  repost:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: ffmpeg ve font kur
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: Repost script'ini çalıştır
+        env:
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_BUCKET: insta-repost
+          CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
+          MAX_REPOSTS_PER_VIDEO: "1"
+        run: python scripts/repost.py

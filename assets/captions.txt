@@ -1,0 +1,6 @@
+# Her satır bir üst yazı varyantı — script her çalıştığında rastgele birini seçer.
+# İstediğin kadar satır ekleyip çıkarabilirsin.
+Bunu izlemeden geçme 👀
+Bunu kaçırma!
+Dur biraz izle 🎬
+Bir daha izlemelik 🔁
