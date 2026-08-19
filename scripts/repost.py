@@ -54,7 +54,10 @@ def load_state() -> dict:
     r = requests.get(url, headers=supabase_headers())
     if r.status_code == 200:
         return r.json()
-    if r.status_code == 404:
+    # Supabase Storage, henüz hiç yüklenmemiş bir dosya için 404 yerine
+    # 400 de dönebiliyor (obje/klasör hiç oluşturulmamışsa) — ilk
+    # çalıştırmada bu normal, boş state ile devam ediyoruz.
+    if r.status_code in (400, 404):
         return {}
     r.raise_for_status()
     return {}
