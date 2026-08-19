@@ -40,6 +40,14 @@ def log(msg: str) -> None:
     print(f"[repost] {msg}", flush=True)
 
 
+def raise_for_status_verbose(r: requests.Response) -> None:
+    """r.raise_for_status() gibi ama hata gövdesini de loga yazar (Graph API/Supabase
+    hata mesajları genelde JSON body içinde, aksi halde sebep görünmüyor)."""
+    if not r.ok:
+        log(f"HTTP {r.status_code} yanıt gövdesi: {r.text[:2000]}")
+    r.raise_for_status()
+
+
 # ---------- Supabase Storage yardımcıları ----------
 
 def supabase_headers() -> dict:
@@ -59,7 +67,7 @@ def load_state() -> dict:
     # çalıştırmada bu normal, boş state ile devam ediyoruz.
     if r.status_code in (400, 404):
         return {}
-    r.raise_for_status()
+    raise_for_status_verbose(r)
     return {}
 
 
@@ -70,7 +78,7 @@ def save_state(state: dict) -> None:
         headers={**supabase_headers(), "Content-Type": "application/json", "x-upsert": "true"},
         data=json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"),
     )
-    r.raise_for_status()
+    raise_for_status_verbose(r)
 
 
 def upload_video(local_path: Path, remote_name: str) -> str:
@@ -81,7 +89,7 @@ def upload_video(local_path: Path, remote_name: str) -> str:
             headers={**supabase_headers(), "Content-Type": "video/mp4", "x-upsert": "true"},
             data=f,
         )
-    r.raise_for_status()
+    raise_for_status_verbose(r)
     return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/videos/{remote_name}"
 
 
@@ -130,7 +138,7 @@ def fetch_own_videos(limit: int = 50) -> list:
     items = []
     while url:
         r = requests.get(url, params=params)
-        r.raise_for_status()
+        raise_for_status_verbose(r)
         data = r.json()
         items.extend(data.get("data", []))
         url = data.get("paging", {}).get("next")
@@ -149,7 +157,7 @@ def create_media_container(video_url: str, caption: str) -> str:
         "caption": caption,
         "access_token": IG_ACCESS_TOKEN,
     })
-    r.raise_for_status()
+    raise_for_status_verbose(r)
     return r.json()["id"]
 
 
@@ -158,7 +166,7 @@ def wait_until_ready(creation_id: str, timeout: int = 600, interval: int = 10) -
     waited = 0
     while waited < timeout:
         r = requests.get(url, params={"fields": "status_code,status", "access_token": IG_ACCESS_TOKEN})
-        r.raise_for_status()
+        raise_for_status_verbose(r)
         data = r.json()
         code = data.get("status_code")
         if code == "FINISHED":
@@ -173,7 +181,7 @@ def wait_until_ready(creation_id: str, timeout: int = 600, interval: int = 10) -
 def publish_media(creation_id: str) -> str:
     url = f"{GRAPH_BASE}/{IG_USER_ID}/media_publish"
     r = requests.post(url, data={"creation_id": creation_id, "access_token": IG_ACCESS_TOKEN})
-    r.raise_for_status()
+    raise_for_status_verbose(r)
     return r.json()["id"]
 
 
@@ -254,7 +262,7 @@ def main() -> None:
         dst = Path(tmp) / "processed.mp4"
 
         r = requests.get(candidate["media_url"], stream=True)
-        r.raise_for_status()
+        raise_for_status_verbose(r)
         with open(src, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
