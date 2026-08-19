@@ -25,8 +25,8 @@ jobs:
         uses: FedericoCarboni/setup-ffmpeg@v3
         id: setup-ffmpeg
 
-      - name: Font indir (apt yerine doğrudan indirme, mirror'lara bağımlı değil)
-        run: curl -fsSL -o /tmp/DejaVuSans-Bold.ttf https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans-Bold.ttf
+      - name: Font kur
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
 
       - name: Bağımlılıkları yükle
         run: pip install -r requirements.txt
@@ -41,5 +41,4 @@ jobs:
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
-          FONT_PATH: /tmp/DejaVuSans-Bold.ttf
         run: python scripts/repost.py
