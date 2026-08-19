@@ -4,7 +4,12 @@ on:
   schedule:
     # 07:00 UTC ≈ 10:00 Türkiye saati (TR yıl boyunca UTC+3). Değiştirmek için crontab.guru kullanabilirsin.
     - cron: "0 7 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Deneme modu: videoyu işleyip Supabase'e yükler ama Instagram'a paylaşmaz"
+        type: boolean
+        default: true
 
 jobs:
   repost:
@@ -31,4 +36,5 @@ jobs:
           SUPABASE_BUCKET: insta-repost
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
         run: python scripts/repost.py

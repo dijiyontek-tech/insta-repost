@@ -77,11 +77,19 @@ projede karışmasın.
 4. `.github/workflows/repost.yml` içindeki `cron` satırını istediğin
    saate göre ayarla (saat UTC cinsinden).
 
-### 4. Test
+### 4. Test — deneme modu
 
 Push'tan sonra Actions sekmesinden workflow'u **"Run workflow"** ile elle
-tetikleyip loglardan takip edebilirsin — cron saatini beklemene gerek
-yok.
+tetikleyebilirsin. Elle tetiklemede karşına çıkan **"Deneme modu"**
+kutucuğu varsayılan olarak **işaretli** gelir: bu modda video işlenip
+Supabase'e yüklenir ama Instagram'a paylaşılmaz. Çalıştırma bitince
+run sayfasının en altındaki **Summary**'de video linkini görüp
+izleyebilirsin. Beğendiysen "Run workflow"u tekrar açıp bu sefer
+**Deneme modu kutucuğunu kapatarak** çalıştır — bu sefer gerçekten
+Instagram'a paylaşılır.
+
+Zamanlanmış (cron) çalıştırmalar her zaman gerçek paylaşım yapar, deneme
+modunda çalışmaz — deneme modu yalnızca elle tetiklemede kullanılır.
 
 ## Ayarlanabilir şeyler
 

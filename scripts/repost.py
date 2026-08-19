@@ -31,6 +31,7 @@ STATE_PATH = "state/processed.json"
 MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
 FONT_PATH = os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
 
 TEXT_VARIANTS_FILE = Path(__file__).parent.parent / "assets" / "captions.txt"
 
@@ -84,6 +85,33 @@ def upload_video(local_path: Path, remote_name: str) -> str:
 def delete_video(remote_name: str) -> None:
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/videos/{remote_name}"
     requests.delete(url, headers=supabase_headers())
+
+
+def cleanup_old_videos(max_age_hours: int = 24) -> None:
+    """videos/ altında max_age_hours'tan eski dosyaları siler (özellikle deneme modu artıkları için)."""
+    from datetime import datetime, timezone
+
+    url = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
+    r = requests.post(url, headers=supabase_headers(), json={"prefix": "videos"})
+    if r.status_code != 200:
+        return
+    now = datetime.now(timezone.utc)
+    stale = []
+    for item in r.json():
+        created_at = item.get("created_at")
+        name = item.get("name")
+        if not created_at or not name:
+            continue
+        age_hours = (now - datetime.fromisoformat(created_at.replace("Z", "+00:00"))).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            stale.append(f"videos/{name}")
+    if stale:
+        requests.delete(
+            f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}",
+            headers=supabase_headers(),
+            json={"prefixes": stale},
+        )
+        log(f"{len(stale)} eski geçici video temizlendi.")
 
 
 # ---------- Instagram Graph API yardımcıları ----------
@@ -195,6 +223,7 @@ def process_video(src: Path, dst: Path) -> None:
 # ---------- Ana akış ----------
 
 def main() -> None:
+    cleanup_old_videos()
     state = load_state()
     videos = fetch_own_videos()
     if not videos:
@@ -234,6 +263,21 @@ def main() -> None:
     caption = (candidate.get("caption") or "").strip()
     if CAPTION_SUFFIX:
         caption = f"{caption}\n\n{CAPTION_SUFFIX}" if caption else CAPTION_SUFFIX
+
+    if DRY_RUN:
+        log("DENEME MODU: Instagram'a paylaşılmadı. Videoyu şu linkten izleyebilirsin:")
+        log(public_url)
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(
+                    "## 🎬 Deneme modu — işlenmiş video\n\n"
+                    f"[Videoyu izle]({public_url})\n\n"
+                    f"Video 24 saatten eskiyince bir sonraki çalıştırmada otomatik silinir. Beğendiysen "
+                    "\"Run workflow\" ile bu sefer **Deneme modu**'nu kapatıp gerçek "
+                    "paylaşımı tetikleyebilirsin.\n"
+                )
+        return
 
     try:
         creation_id = create_media_container(public_url, caption)
