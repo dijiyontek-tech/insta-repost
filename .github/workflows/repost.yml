@@ -17,10 +17,6 @@ on:
           - random
           - most_liked
         default: random
-      trial:
-        description: "Instagram'ın 'Deneme Reels' özelliğiyle paylaş (önce yalnızca takipçi olmayanlara gösterilir)"
-        type: boolean
-        default: false
 
 jobs:
   repost:
@@ -49,5 +45,8 @@ jobs:
           MAX_REPOSTS_PER_VIDEO: "1"
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'random' }}
-          TRIAL_REEL: ${{ inputs.trial || 'false' }}
+          # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
+          # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
+          # bastırılıyor, deneme modu bunu aşmanın yolu).
+          TRIAL_REEL: "true"
         run: python scripts/repost.py
