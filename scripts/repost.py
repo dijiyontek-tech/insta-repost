@@ -6,6 +6,7 @@ Kendi Instagram videolarini otomatik "remix"leyip (çevirme / hafif efekt /
 Sadece resmi Meta Graph API kullanır — kullanıcı adı/şifre ile giriş yoktur.
 """
 import json
+import math
 import os
 import random
 import subprocess
@@ -190,22 +191,38 @@ def publish_media(creation_id: str) -> str:
 
 # ---------- Video işleme ----------
 
-def pick_text_variant() -> Optional[str]:
+def pick_text_variant(last_caption: Optional[str]) -> Optional[str]:
     if not TEXT_VARIANTS_FILE.exists():
         return None
     lines = [l.strip() for l in TEXT_VARIANTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
-    return random.choice(lines) if lines else None
+    if not lines:
+        return None
+    # Bir önceki çalıştırmada kullanılan yazıyı, başka seçenek varsa tekrar etme.
+    candidates = [l for l in lines if l != last_caption] if len(lines) > 1 else lines
+    return random.choice(candidates or lines)
 
 
-def process_video(src: Path, dst: Path) -> None:
+def process_video(src: Path, dst: Path, history: dict) -> dict:
     """Videoyu çevirir, renk/kontrast varyasyonu + keskinlik + vinyet uygular,
-    hafif hız değişimi yapar ve videonun başında birkaç saniye üst yazı gösterir."""
+    hafif hız değişimi yapar ve videonun başında birkaç saniye üst yazı gösterir.
+
+    `history` bir önceki çalıştırmada seçilen değerleri taşır; aynı efektin art
+    arda tekrar etmemesi için burada kullanılır. Döndürülen dict bir sonraki
+    çalıştırma için state'e kaydedilir."""
     filters = []
 
-    if random.random() < 0.6:
+    last_flip = history.get("flip")
+    if last_flip is None:
+        flip = random.random() < 0.6
+    else:
+        # %80 ihtimalle bir önceki seçimin tersini yap, tamamen rastgeleliği
+        # kaybetmemek için %20 ihtimalle aynı kalabilir.
+        flip = (random.random() < 0.8) != last_flip
+    if flip:
         filters.append("hflip")
 
-    filters.append("crop=iw*0.97:ih*0.97")
+    crop_pct = round(random.uniform(0.94, 0.98), 3)
+    filters.append(f"crop=iw*{crop_pct}:ih*{crop_pct}")
     filters.append("scale=1080:1920")
 
     brightness = round(random.uniform(-0.04, 0.04), 3)
@@ -215,12 +232,15 @@ def process_video(src: Path, dst: Path) -> None:
 
     # Hafif keskinlik ve kenar kararması (vinyet) — telefon kamera uygulamalarının
     # varsayılan "pop" efektine benzer, düz ffmpeg çıktısını daha az "ham" gösterir.
-    filters.append("unsharp=5:5:0.8:5:5:0.0")
-    filters.append("vignette=PI/5")
+    # Yoğunlukları da her seferinde biraz değişsin diye rastgele.
+    unsharp_amount = round(random.uniform(0.4, 1.1), 2)
+    filters.append(f"unsharp=5:5:{unsharp_amount}:5:5:0.0")
+    vignette_angle = round(random.uniform(math.pi / 8, math.pi / 3.2), 3)
+    filters.append(f"vignette={vignette_angle}")
 
-    text = pick_text_variant()
-    if text:
-        escaped = text.replace(":", "\\:").replace("'", "\\'")
+    caption = pick_text_variant(history.get("caption"))
+    if caption:
+        escaped = caption.replace(":", "\\:").replace("'", "\\'")
         filters.append(
             f"drawtext=fontfile={FONT_PATH}:"
             f"text='{escaped}':fontcolor=white:fontsize=68:"
@@ -245,6 +265,8 @@ def process_video(src: Path, dst: Path) -> None:
         str(dst),
     ]
     subprocess.run(cmd, check=True)
+
+    return {"flip": flip, "caption": caption}
 
 
 # ---------- Ana akış ----------
@@ -283,7 +305,8 @@ def main() -> None:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
 
-        process_video(src, dst)
+        history = process_video(src, dst, state.get("_history", {}))
+        state["_history"] = history
         public_url = upload_video(dst, remote_name)
         log(f"Video Supabase'e yüklendi: {public_url}")
 
@@ -294,6 +317,7 @@ def main() -> None:
     if DRY_RUN:
         log("DENEME MODU: Instagram'a paylaşılmadı. Videoyu şu linkten izleyebilirsin:")
         log(public_url)
+        save_state(state)  # bir sonraki çalıştırma aynı efekt/yazıyı tekrar etmesin diye
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary_path:
             with open(summary_path, "a", encoding="utf-8") as f:
