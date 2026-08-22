@@ -33,6 +33,10 @@ STATE_PATH = "state/processed.json"
 MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
+# "random" (varsayılan, günlük otomasyon için) ya da "most_liked" (en çok
+# beğenilen uygun videoyu seçer — Instagram bu API'de izlenme sayısı
+# vermediği için en yakın popülerlik ölçütü bu).
+MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
 
 
 def log(msg: str) -> None:
@@ -130,7 +134,7 @@ def fetch_own_videos(limit: int = 50) -> list:
     """Kendi hesabındaki video/Reels medyalarını çeker (sayfalayarak)."""
     url = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     params = {
-        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink",
+        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink,like_count",
         "limit": limit,
         "access_token": IG_ACCESS_TOKEN,
     }
@@ -238,13 +242,14 @@ def main() -> None:
         log("Hesapta video bulunamadı.")
         return
 
-    random.shuffle(videos)
-    candidate = None
-    for v in videos:
-        count = state.get(v["id"], {}).get("repost_count", 0)
-        if count < MAX_REPOSTS_PER_VIDEO:
-            candidate = v
-            break
+    eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
+
+    if MEDIA_SELECTION == "most_liked":
+        eligible.sort(key=lambda v: v.get("like_count", 0), reverse=True)
+        candidate = eligible[0] if eligible else None
+    else:
+        random.shuffle(eligible)
+        candidate = eligible[0] if eligible else None
 
     if not candidate:
         log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
@@ -268,9 +273,9 @@ def main() -> None:
         public_url = upload_video(dst, remote_name)
         log(f"Video Supabase'e yüklendi: {public_url}")
 
-    caption = (candidate.get("caption") or "").strip()
-    if CAPTION_SUFFIX:
-        caption = f"{caption}\n\n{CAPTION_SUFFIX}" if caption else CAPTION_SUFFIX
+    # CAPTION_SUFFIX ayarlıysa paylaşımın tam metni olarak kullanılır (orijinal
+    # caption'ın yerine geçer); ayarlı değilse orijinal caption aynen kullanılır.
+    caption = CAPTION_SUFFIX or (candidate.get("caption") or "").strip()
 
     if DRY_RUN:
         log("DENEME MODU: Instagram'a paylaşılmadı. Videoyu şu linkten izleyebilirsin:")
