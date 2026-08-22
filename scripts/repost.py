@@ -136,7 +136,7 @@ def fetch_own_videos(limit: int = 50) -> list:
     """Kendi hesabındaki video/Reels medyalarını çeker (sayfalayarak)."""
     url = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     params = {
-        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink,like_count,view_count",
+        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink,like_count",
         "limit": limit,
         "access_token": IG_ACCESS_TOKEN,
     }
@@ -153,6 +153,22 @@ def fetch_own_videos(limit: int = 50) -> list:
         if (it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS")
         and it.get("media_url")
     ]
+
+
+def fetch_view_count(media_id: str) -> int:
+    """Insights API'den gerçek izlenme sayısını (views) çeker. Bu ayrı bir
+    izin (instagram_business_manage_insights) gerektirir. Hata olursa 0 döner
+    (o video sıralamada en sona düşer, script çökmez)."""
+    url = f"{GRAPH_BASE}/{media_id}/insights"
+    r = requests.get(url, params={"metric": "views", "access_token": IG_ACCESS_TOKEN})
+    if not r.ok:
+        return 0
+    for metric in r.json().get("data", []):
+        if metric.get("name") == "views":
+            values = metric.get("values", [])
+            if values:
+                return values[0].get("value", 0)
+    return 0
 
 
 def create_media_container(video_url: str, caption: str, trial: bool = False) -> str:
@@ -242,6 +258,28 @@ def process_video(src: Path, dst: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
+VIEW_COUNT_CACHE_TTL = 6 * 3600  # saniye
+
+
+def get_view_counts(state: dict, videos: list) -> dict:
+    """Her video için gerçek izlenme sayısını döndürür. state'te 6 saatten
+    taze bir değer varsa tekrar API çağrısı yapmadan onu kullanır — 121 video
+    için her 30 dakikalık çalıştırmada 121 ekstra çağrı yapmamak için."""
+    cache = state.setdefault("_view_counts", {})
+    now = int(time.time())
+    counts = {}
+    for v in videos:
+        vid = v["id"]
+        cached = cache.get(vid)
+        if cached and now - cached.get("fetched_at", 0) < VIEW_COUNT_CACHE_TTL:
+            counts[vid] = cached["views"]
+        else:
+            views = fetch_view_count(vid)
+            cache[vid] = {"views": views, "fetched_at": now}
+            counts[vid] = views
+    return counts
+
+
 # ---------- Ana akış ----------
 
 def main() -> None:
@@ -259,9 +297,12 @@ def main() -> None:
         # altındakiler hiç dahil edilmez). Bu turda kullanılmamış en yüksek
         # izlenmeli video seçilir; hiçbiri kalmadıysa yeni bir tur başlatıp
         # baştan (en yüksek izlenmeliden) devam eder.
+        view_counts = get_view_counts(state, videos)
+        for v in videos:
+            v["view_count"] = view_counts.get(v["id"], 0)
         by_views = sorted(videos, key=lambda v: v.get("view_count", 0), reverse=True)
         top5 = ", ".join(f"{v['id']}:{v.get('view_count')}" for v in by_views[:5])
-        log(f"Teşhis — en yüksek 5 izlenme değeri (id:view_count): {top5}")
+        log(f"En yüksek 5 izlenme değeri (id:views): {top5}")
         pool = [v for v in videos if (v.get("view_count") or 0) >= MIN_VIEW_COUNT]
         pool.sort(key=lambda v: v.get("view_count", 0), reverse=True)
         candidate = next(
