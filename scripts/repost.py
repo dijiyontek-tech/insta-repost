@@ -147,7 +147,8 @@ def fetch_own_videos(limit: int = 50) -> list:
         params = None  # 'next' URL zaten tüm query'yi içeriyor
     return [
         it for it in items
-        if it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS"
+        if (it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS")
+        and it.get("media_url")
     ]
 
 
