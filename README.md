@@ -1,8 +1,8 @@
 # Instagram Reels Remix & Repost
 
 Kendi Reels'lerini her gün otomatik olarak alır, hafif değişikliklerle
-(çevirme, renk/kontrast varyasyonu, üst yazı değişimi) yeniden işler ve
-resmi **Meta Graph API** ile tekrar paylaşır. Kullanıcı adı/şifre ile giriş
+(çevirme, renk/kontrast varyasyonu, hafif keskinlik/vinyet, hız değişimi)
+yeniden işler ve resmi **Meta Graph API** ile tekrar paylaşır. Kullanıcı adı/şifre ile giriş
 yoktur — yalnızca Instagram Business hesabına bağlı bir erişim token'ı
 kullanılır, bu yüzden hesap askıya alınma riski şifre-tabanlı bot
 yöntemlerine göre çok daha düşüktür.
@@ -12,8 +12,9 @@ yöntemlerine göre çok daha düşüktür.
 1. GitHub Actions her gün belirlediğin saatte tetiklenir.
 2. Script, Graph API üzerinden kendi hesabındaki videoları listeler.
 3. Daha önce (limitten az) remix'lenmemiş bir video seçer, indirir.
-4. `ffmpeg` ile çevirir + hafif renk/kontrast oynatır + rastgele bir üst
-   yazı ekler (`assets/captions.txt`'ten).
+4. `ffmpeg` ile çevirir + renk/kontrast/keskinlik/vinyet oynatır + hafif
+   hız değişimi uygular. Bir önceki çalıştırmanın çevirme yönünü art arda
+   tekrar etmez.
 5. İşlenmiş videoyu geçici olarak Supabase Storage'a yükler (Instagram'ın
    videoyu çekebilmesi için herkese açık bir URL gerekiyor).
 6. Graph API ile Reels olarak yayınlar, sonra geçici dosyayı Supabase'ten
@@ -93,7 +94,6 @@ modunda çalışmaz — deneme modu yalnızca elle tetiklemede kullanılır.
 
 ## Ayarlanabilir şeyler
 
-- `assets/captions.txt`: üst yazı varyantları, her satır bir seçenek.
 - `MAX_REPOSTS_PER_VIDEO`: aynı videonun en fazla kaç kez remix'lenip
   paylaşılacağı (varsayılan 1).
 - `scripts/repost.py` içindeki `process_video`: çevirme olasılığı,

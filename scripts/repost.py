@@ -14,7 +14,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
 
 import requests
 
@@ -33,10 +32,7 @@ SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "insta-repost")
 STATE_PATH = "state/processed.json"
 MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
-FONT_PATH = os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
-
-TEXT_VARIANTS_FILE = Path(__file__).parent.parent / "assets" / "captions.txt"
 
 
 def log(msg: str) -> None:
@@ -191,20 +187,9 @@ def publish_media(creation_id: str) -> str:
 
 # ---------- Video işleme ----------
 
-def pick_text_variant(last_caption: Optional[str]) -> Optional[str]:
-    if not TEXT_VARIANTS_FILE.exists():
-        return None
-    lines = [l.strip() for l in TEXT_VARIANTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if not lines:
-        return None
-    # Bir önceki çalıştırmada kullanılan yazıyı, başka seçenek varsa tekrar etme.
-    candidates = [l for l in lines if l != last_caption] if len(lines) > 1 else lines
-    return random.choice(candidates or lines)
-
-
 def process_video(src: Path, dst: Path, history: dict) -> dict:
-    """Videoyu çevirir, renk/kontrast varyasyonu + keskinlik + vinyet uygular,
-    hafif hız değişimi yapar ve videonun başında birkaç saniye üst yazı gösterir.
+    """Videoyu çevirir, renk/kontrast varyasyonu + hafif keskinlik/vinyet uygular
+    ve hafif hız değişimi yapar. Üst yazı yok.
 
     `history` bir önceki çalıştırmada seçilen değerleri taşır; aynı efektin art
     arda tekrar etmemesi için burada kullanılır. Döndürülen dict bir sonraki
@@ -230,25 +215,12 @@ def process_video(src: Path, dst: Path, history: dict) -> dict:
     saturation = round(random.uniform(0.9, 1.15), 3)
     filters.append(f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}")
 
-    # Hafif keskinlik ve kenar kararması (vinyet) — telefon kamera uygulamalarının
-    # varsayılan "pop" efektine benzer, düz ffmpeg çıktısını daha az "ham" gösterir.
-    # Yoğunlukları da her seferinde biraz değişsin diye rastgele.
-    unsharp_amount = round(random.uniform(0.4, 1.1), 2)
+    # Hafif keskinlik ve çok hafif kenar kararması (vinyet) — belirgin/dikkat
+    # çekici olmayacak kadar hafif tutuluyor.
+    unsharp_amount = round(random.uniform(0.3, 0.7), 2)
     filters.append(f"unsharp=5:5:{unsharp_amount}:5:5:0.0")
-    vignette_angle = round(random.uniform(math.pi / 8, math.pi / 3.2), 3)
+    vignette_angle = round(random.uniform(math.pi / 12, math.pi / 8), 3)
     filters.append(f"vignette={vignette_angle}")
-
-    caption = pick_text_variant(history.get("caption"))
-    if caption:
-        escaped = caption.replace(":", "\\:").replace("'", "\\'")
-        filters.append(
-            f"drawtext=fontfile={FONT_PATH}:"
-            f"text='{escaped}':fontcolor=white:fontsize=68:"
-            "box=1:boxcolor=black@0.5:boxborderw=24:"
-            "shadowcolor=black@0.6:shadowx=2:shadowy=2:"
-            "x=(w-text_w)/2:y=h*0.08:"
-            "enable='lt(t,4)'"
-        )
 
     filter_chain = ",".join(filters)
 
@@ -266,7 +238,7 @@ def process_video(src: Path, dst: Path, history: dict) -> dict:
     ]
     subprocess.run(cmd, check=True)
 
-    return {"flip": flip, "caption": caption}
+    return {"flip": flip}
 
 
 # ---------- Ana akış ----------
