@@ -297,6 +297,18 @@ def main() -> None:
         return
 
     videos = fetch_own_videos()
+
+    # Kendi attığımız (remix'lenmiş) videoları asla yeniden kaynak olarak
+    # seçme — hem daha önce paylaştığımız medya ID'lerini hem de sabit
+    # caption'ımızla eşleşen videoları eliyoruz (ikisi de kendi paylaşımımız
+    # olduğunu gösterir).
+    posted_ids = set(state.get("_posted_ids", []))
+    videos = [
+        v for v in videos
+        if v["id"] not in posted_ids
+        and not (CAPTION_SUFFIX and (v.get("caption") or "").strip() == CAPTION_SUFFIX.strip())
+    ]
+
     if not videos:
         log("Hesapta video bulunamadı.")
         return
@@ -395,6 +407,8 @@ def main() -> None:
     state[candidate["id"]] = entry
     daily["count"] += 1
     state["_daily"] = daily
+    posted_ids.add(media_id)
+    state["_posted_ids"] = list(posted_ids)
     save_state(state)
 
 
