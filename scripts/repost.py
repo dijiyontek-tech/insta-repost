@@ -37,6 +37,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "y
 # beğenilen uygun videoyu seçer — Instagram bu API'de izlenme sayısı
 # vermediği için en yakın popülerlik ölçütü bu).
 MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
+TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
 
 
 def log(msg: str) -> None:
@@ -153,14 +154,20 @@ def fetch_own_videos(limit: int = 50) -> list:
     ]
 
 
-def create_media_container(video_url: str, caption: str) -> str:
+def create_media_container(video_url: str, caption: str, trial: bool = False) -> str:
     url = f"{GRAPH_BASE}/{IG_USER_ID}/media"
-    r = requests.post(url, data={
+    data = {
         "media_type": "REELS",
         "video_url": video_url,
         "caption": caption,
         "access_token": IG_ACCESS_TOKEN,
-    })
+    }
+    if trial:
+        # Instagram uygulamasındaki "Deneme" özelliğinin API karşılığı:
+        # Reels ilk başta yalnızca takipçi olmayanlara gösterilir, profilde
+        # görünmez. MANUAL: sen manuel olarak "herkese aç" demeden yaygınlaşmaz.
+        data["trial_params"] = json.dumps({"graduation_strategy": "MANUAL"})
+    r = requests.post(url, data=data)
     raise_for_status_verbose(r)
     return r.json()["id"]
 
@@ -293,7 +300,7 @@ def main() -> None:
         return
 
     try:
-        creation_id = create_media_container(public_url, caption)
+        creation_id = create_media_container(public_url, caption, trial=TRIAL_REEL)
         log(f"Container oluşturuldu: {creation_id}")
         wait_until_ready(creation_id)
         media_id = publish_media(creation_id)
