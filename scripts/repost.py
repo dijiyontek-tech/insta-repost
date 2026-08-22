@@ -42,7 +42,7 @@ MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "10000"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
 # Instagram'ın kendi günlük paylaşım limitine (~25) yaklaşınca kalan
 # çalıştırmalar indirme/işleme yapmadan sessizce atlanır.
-DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "25"))
+DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "20"))
 
 
 def log(msg: str) -> None:
