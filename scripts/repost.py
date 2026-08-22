@@ -187,24 +187,13 @@ def publish_media(creation_id: str) -> str:
 
 # ---------- Video işleme ----------
 
-def process_video(src: Path, dst: Path, history: dict) -> dict:
-    """Videoyu çevirir, renk/kontrast varyasyonu + hafif keskinlik/vinyet uygular
-    ve hafif hız değişimi yapar. Üst yazı yok.
+def process_video(src: Path, dst: Path) -> None:
+    """Videoyu renk/kontrast varyasyonu + hafif keskinlik/vinyet ile işler ve
+    hafif hız değişimi uygular. Üst yazı yok.
 
-    `history` bir önceki çalıştırmada seçilen değerleri taşır; aynı efektin art
-    arda tekrar etmemesi için burada kullanılır. Döndürülen dict bir sonraki
-    çalıştırma için state'e kaydedilir."""
+    Not: Yatay çevirme (hflip) kasıtlı olarak kullanılmıyor — kaynak videonun
+    içine gömülü yazılar varsa çevirmede ters/okunmaz hale geliyordu."""
     filters = []
-
-    last_flip = history.get("flip")
-    if last_flip is None:
-        flip = random.random() < 0.6
-    else:
-        # %80 ihtimalle bir önceki seçimin tersini yap, tamamen rastgeleliği
-        # kaybetmemek için %20 ihtimalle aynı kalabilir.
-        flip = (random.random() < 0.8) != last_flip
-    if flip:
-        filters.append("hflip")
 
     crop_pct = round(random.uniform(0.94, 0.98), 3)
     filters.append(f"crop=iw*{crop_pct}:ih*{crop_pct}")
@@ -237,8 +226,6 @@ def process_video(src: Path, dst: Path, history: dict) -> dict:
         str(dst),
     ]
     subprocess.run(cmd, check=True)
-
-    return {"flip": flip}
 
 
 # ---------- Ana akış ----------
@@ -277,8 +264,7 @@ def main() -> None:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
 
-        history = process_video(src, dst, state.get("_history", {}))
-        state["_history"] = history
+        process_video(src, dst)
         public_url = upload_video(dst, remote_name)
         log(f"Video Supabase'e yüklendi: {public_url}")
 
@@ -289,7 +275,6 @@ def main() -> None:
     if DRY_RUN:
         log("DENEME MODU: Instagram'a paylaşılmadı. Videoyu şu linkten izleyebilirsin:")
         log(public_url)
-        save_state(state)  # bir sonraki çalıştırma aynı efekt/yazıyı tekrar etmesin diye
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary_path:
             with open(summary_path, "a", encoding="utf-8") as f:
