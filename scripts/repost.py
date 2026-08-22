@@ -208,7 +208,9 @@ def process_video(src: Path, dst: Path) -> None:
 
     crop_pct = round(random.uniform(0.94, 0.98), 3)
     filters.append(f"crop=iw*{crop_pct}:ih*{crop_pct}")
-    filters.append("scale=1080:1920")
+    # Kaynak videonun çözünürlüğünü büyütmüyoruz (upscale kalite kaybına yol
+    # açıyordu) — sadece x264'ün gerektirdiği gibi çift sayıya yuvarlıyoruz.
+    filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
 
     brightness = round(random.uniform(-0.04, 0.04), 3)
     contrast = round(random.uniform(0.92, 1.12), 3)
@@ -232,8 +234,8 @@ def process_video(src: Path, dst: Path) -> None:
         "ffmpeg", "-y", "-i", str(src),
         "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
         "-af", f"atempo={speed}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+        "-c:a", "aac", "-b:a", "192k",
         str(dst),
     ]
     subprocess.run(cmd, check=True)
