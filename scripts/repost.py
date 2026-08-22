@@ -197,35 +197,48 @@ def pick_text_variant() -> Optional[str]:
 
 
 def process_video(src: Path, dst: Path) -> None:
-    """Videoyu çevirir, hafif renk/kontrast varyasyonu uygular ve üst yazı ekler."""
+    """Videoyu çevirir, renk/kontrast varyasyonu + keskinlik + vinyet uygular,
+    hafif hız değişimi yapar ve videonun başında birkaç saniye üst yazı gösterir."""
     filters = []
 
     if random.random() < 0.6:
         filters.append("hflip")
 
-    brightness = round(random.uniform(-0.03, 0.03), 3)
-    contrast = round(random.uniform(0.95, 1.08), 3)
-    saturation = round(random.uniform(0.95, 1.1), 3)
-    filters.append(f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}")
-
     filters.append("crop=iw*0.97:ih*0.97")
     filters.append("scale=1080:1920")
+
+    brightness = round(random.uniform(-0.04, 0.04), 3)
+    contrast = round(random.uniform(0.92, 1.12), 3)
+    saturation = round(random.uniform(0.9, 1.15), 3)
+    filters.append(f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}")
+
+    # Hafif keskinlik ve kenar kararması (vinyet) — telefon kamera uygulamalarının
+    # varsayılan "pop" efektine benzer, düz ffmpeg çıktısını daha az "ham" gösterir.
+    filters.append("unsharp=5:5:0.8:5:5:0.0")
+    filters.append("vignette=PI/5")
 
     text = pick_text_variant()
     if text:
         escaped = text.replace(":", "\\:").replace("'", "\\'")
         filters.append(
             f"drawtext=fontfile={FONT_PATH}:"
-            f"text='{escaped}':fontcolor=white:fontsize=64:"
-            "box=1:boxcolor=black@0.45:boxborderw=20:"
-            "x=(w-text_w)/2:y=h*0.08"
+            f"text='{escaped}':fontcolor=white:fontsize=68:"
+            "box=1:boxcolor=black@0.5:boxborderw=24:"
+            "shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+            "x=(w-text_w)/2:y=h*0.08:"
+            "enable='lt(t,4)'"
         )
 
     filter_chain = ",".join(filters)
 
+    # Hafif hız değişimi (video + ses birlikte) — hem görsel imzayı biraz daha
+    # değiştirir hem de videoya hafif dinamizm katar.
+    speed = round(random.uniform(0.97, 1.04), 3)
+
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
-        "-vf", filter_chain,
+        "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
+        "-af", f"atempo={speed}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         str(dst),
