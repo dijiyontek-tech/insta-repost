@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import requests
@@ -39,6 +40,9 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "y
 MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
 MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "10000"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
+# Instagram'ın kendi günlük paylaşım limitine (~25) yaklaşınca kalan
+# çalıştırmalar indirme/işleme yapmadan sessizce atlanır.
+DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "25"))
 
 
 def log(msg: str) -> None:
@@ -105,8 +109,6 @@ def delete_video(remote_name: str) -> None:
 
 def cleanup_old_videos(max_age_hours: int = 24) -> None:
     """videos/ altında max_age_hours'tan eski dosyaları siler (özellikle deneme modu artıkları için)."""
-    from datetime import datetime, timezone
-
     url = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
     r = requests.post(url, headers=supabase_headers(), json={"prefix": "videos"})
     if r.status_code != 200:
@@ -285,6 +287,15 @@ def get_view_counts(state: dict, videos: list) -> dict:
 def main() -> None:
     cleanup_old_videos()
     state = load_state()
+
+    today = date.today().isoformat()
+    daily = state.get("_daily", {})
+    if daily.get("date") != today:
+        daily = {"date": today, "count": 0}
+    if not DRY_RUN and daily["count"] >= DAILY_PUBLISH_LIMIT:
+        log(f"Bugün için günlük paylaşım limiti ({DAILY_PUBLISH_LIMIT}) zaten doldu, atlanıyor.")
+        return
+
     videos = fetch_own_videos()
     if not videos:
         log("Hesapta video bulunamadı.")
@@ -382,6 +393,8 @@ def main() -> None:
     if MEDIA_SELECTION == "top_viewed_cycle":
         entry["last_cycle_used"] = cycle
     state[candidate["id"]] = entry
+    daily["count"] += 1
+    state["_daily"] = daily
     save_state(state)
 
 
