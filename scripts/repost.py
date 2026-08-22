@@ -18,7 +18,9 @@ from typing import Optional
 import requests
 
 GRAPH_API_VERSION = "v21.0"
-GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+# "Instagram API with Instagram Login" akışıyla üretilen token'lar
+# graph.facebook.com değil, graph.instagram.com üzerinden çalışıyor.
+GRAPH_BASE = f"https://graph.instagram.com/{GRAPH_API_VERSION}"
 
 IG_USER_ID = os.environ["IG_BUSINESS_ACCOUNT_ID"]
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
