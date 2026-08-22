@@ -259,6 +259,9 @@ def main() -> None:
         # altındakiler hiç dahil edilmez). Bu turda kullanılmamış en yüksek
         # izlenmeli video seçilir; hiçbiri kalmadıysa yeni bir tur başlatıp
         # baştan (en yüksek izlenmeliden) devam eder.
+        by_views = sorted(videos, key=lambda v: v.get("view_count", 0), reverse=True)
+        top5 = ", ".join(f"{v['id']}:{v.get('view_count')}" for v in by_views[:5])
+        log(f"Teşhis — en yüksek 5 izlenme değeri (id:view_count): {top5}")
         pool = [v for v in videos if (v.get("view_count") or 0) >= MIN_VIEW_COUNT]
         pool.sort(key=lambda v: v.get("view_count", 0), reverse=True)
         candidate = next(
