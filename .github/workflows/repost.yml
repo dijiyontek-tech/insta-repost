@@ -2,8 +2,10 @@ name: Instagram Reels Remix & Repost
 
 on:
   schedule:
-    # 07:00 UTC ≈ 10:00 Türkiye saati (TR yıl boyunca UTC+3). Değiştirmek için crontab.guru kullanabilirsin.
-    - cron: "0 7 * * *"
+    # 05:00-18:00 UTC ≈ 08:00-21:00 Türkiye saati, 30 dakikada bir ≈ günde 27
+    # çalıştırma. Instagram'ın ~25/gün paylaşım limitine yakın; son 1-2
+    # çalıştırma bazı günler limit dolduğu için başarısız olabilir, bu normal.
+    - cron: "*/30 5-18 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -14,9 +16,10 @@ on:
         description: "Hangi video seçilsin"
         type: choice
         options:
+          - top_viewed_cycle
           - random
           - most_liked
-        default: random
+        default: top_viewed_cycle
 
 jobs:
   repost:
@@ -44,7 +47,8 @@ jobs:
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
-          MEDIA_SELECTION: ${{ inputs.media_selection || 'random' }}
+          MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
+          MIN_VIEW_COUNT: "10000"
           # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
           # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
           # bastırılıyor, deneme modu bunu aşmanın yolu).

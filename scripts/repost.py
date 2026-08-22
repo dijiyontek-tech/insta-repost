@@ -33,10 +33,11 @@ STATE_PATH = "state/processed.json"
 MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
-# "random" (varsayılan, günlük otomasyon için) ya da "most_liked" (en çok
-# beğenilen uygun videoyu seçer — Instagram bu API'de izlenme sayısı
-# vermediği için en yakın popülerlik ölçütü bu).
+# "random", "most_liked" ya da "top_viewed_cycle" (izlenmesi en yüksekten
+# en düşüğe doğru, MIN_VIEW_COUNT eşiğinin altına inmeden döner; eşiğin
+# altındaki tüm videolar tüketilince baştan başlar).
 MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
+MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "10000"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
 
 
@@ -135,7 +136,7 @@ def fetch_own_videos(limit: int = 50) -> list:
     """Kendi hesabındaki video/Reels medyalarını çeker (sayfalayarak)."""
     url = f"{GRAPH_BASE}/{IG_USER_ID}/media"
     params = {
-        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink,like_count",
+        "fields": "id,media_type,media_product_type,media_url,caption,timestamp,permalink,like_count,view_count",
         "limit": limit,
         "access_token": IG_ACCESS_TOKEN,
     }
@@ -251,17 +252,37 @@ def main() -> None:
         log("Hesapta video bulunamadı.")
         return
 
-    eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
+    cycle = state.get("_cycle", 0)
 
-    if MEDIA_SELECTION == "most_liked":
+    if MEDIA_SELECTION == "top_viewed_cycle":
+        # İzlenmesi en yüksekten en düşüğe doğru sırayla paylaşır (eşiğin
+        # altındakiler hiç dahil edilmez). Bu turda kullanılmamış en yüksek
+        # izlenmeli video seçilir; hiçbiri kalmadıysa yeni bir tur başlatıp
+        # baştan (en yüksek izlenmeliden) devam eder.
+        pool = [v for v in videos if (v.get("view_count") or 0) >= MIN_VIEW_COUNT]
+        pool.sort(key=lambda v: v.get("view_count", 0), reverse=True)
+        candidate = next(
+            (v for v in pool if state.get(v["id"], {}).get("last_cycle_used", -1) < cycle),
+            None,
+        )
+        if candidate is None and pool:
+            cycle += 1
+            state["_cycle"] = cycle
+            candidate = pool[0]
+    elif MEDIA_SELECTION == "most_liked":
+        eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
         eligible.sort(key=lambda v: v.get("like_count", 0), reverse=True)
         candidate = eligible[0] if eligible else None
     else:
+        eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
         random.shuffle(eligible)
         candidate = eligible[0] if eligible else None
 
     if not candidate:
-        log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
+        if MEDIA_SELECTION == "top_viewed_cycle":
+            log(f"{MIN_VIEW_COUNT} üzeri izlenmeye sahip video bulunamadı.")
+        else:
+            log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
         return
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
@@ -314,6 +335,8 @@ def main() -> None:
     entry = state.get(candidate["id"], {"repost_count": 0})
     entry["repost_count"] = entry.get("repost_count", 0) + 1
     entry["last_reposted_at"] = int(time.time())
+    if MEDIA_SELECTION == "top_viewed_cycle":
+        entry["last_cycle_used"] = cycle
     state[candidate["id"]] = entry
     save_state(state)
 
