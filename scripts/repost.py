@@ -250,69 +250,72 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
         log("UYARI: playwright kurulu değil, tarayıcı tabanlı indirme atlanıyor.")
         return None
 
+    # Instagram videoyu parçalı (fragmented/DASH) mp4 segmentleri olarak
+    # sunuyor: ağ trafiğinde yakalanan tek bir segment isteği (moof/mdat)
+    # başlangıç (init/moov) segmentini içermediği için ffmpeg'de "could not
+    # find corresponding trex" hatasıyla açılamıyor. Bunun yerine tarayıcının
+    # <video> elemanının kendisinden (currentSrc — bu blob: veya gerçek bir
+    # CDN URL'i olabilir) sayfa İÇİNDEN fetch() ile indiriyoruz: bu, MSE'nin
+    # zaten birleştirip oynattığı TAM ve geçerli akışı verir.
+    js_extract = """
+    async () => {
+        const video = document.querySelector('video');
+        if (!video) return null;
+        await new Promise(resolve => {
+            if (video.readyState >= 2) return resolve();
+            video.addEventListener('loadeddata', resolve, {once: true});
+            setTimeout(resolve, 8000);
+        });
+        try { video.muted = true; await video.play(); } catch (e) {}
+        const dur = video.duration;
+        if (isFinite(dur) && dur > 0) {
+            for (const frac of [0.3, 0.6, 0.9, 0.99]) {
+                try {
+                    video.currentTime = dur * frac;
+                    await new Promise(r => setTimeout(r, 800));
+                } catch (e) {}
+            }
+        }
+        await new Promise(r => setTimeout(r, 1500));
+        const src = video.currentSrc || video.src;
+        if (!src) return null;
+        try {
+            const resp = await fetch(src);
+            const buf = await resp.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+            }
+            return {src, b64: btoa(binary)};
+        } catch (e) {
+            return {src, error: String(e)};
+        }
+    }
+    """
+
     video_bytes = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
-            seen_urls = []
-
-            def handle_response(response):
-                ctype = response.headers.get("content-type", "")
-                if ".mp4" in response.url or "video/mp4" in ctype:
-                    try:
-                        clen = int(response.headers.get("content-length", "0"))
-                    except ValueError:
-                        clen = 0
-                    if response.url not in [u for u, _ in seen_urls]:
-                        seen_urls.append((response.url, clen))
-
-            page.on("response", handle_response)
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
-                # Videoyu oynatmayı dene: bazı sayfalarda tam dosya isteği
-                # sadece playback tetiklenince yapılıyor, DASH segment/sidx
-                # isteklerinden ayırt etmek için currentSrc'yi de topluyoruz.
-                try:
-                    page.eval_on_selector("video", "el => { el.muted = true; el.play().catch(() => {}); }")
-                except Exception:
-                    pass
-                page.wait_for_timeout(3000)
+                result = page.evaluate(js_extract)
+                if not result:
+                    log("  tarayıcı teşhis: sayfada <video> elemanı bulunamadı.")
+                elif result.get("error"):
+                    log(f"  tarayıcı teşhis: sayfa-içi fetch hatası ({result['src'][:80]}): {result['error']}")
+                elif result.get("b64"):
+                    import base64
 
-                dom_src = None
-                try:
-                    dom_src = page.eval_on_selector("video", "el => el.currentSrc || el.src")
-                except Exception as exc:
-                    log(f"  tarayıcı teşhis: video DOM elemanı bulunamadı ({exc})")
-
-                # Denenecek sıra: önce DOM'daki currentSrc (genelde tam,
-                # ilerlemeli indirilebilir dosya), sonra ağ trafiğinde
-                # yakalanan adaylar (büyük content-length'ten küçüğe doğru,
-                # zira küçük olanlar çoğunlukla sidx/segment index parçası).
-                candidates = []
-                if dom_src:
-                    candidates.append(dom_src)
-                for u, _clen in sorted(seen_urls, key=lambda x: -x[1]):
-                    if u not in candidates:
-                        candidates.append(u)
-
-                if not candidates:
-                    log("  tarayıcı teşhis: ne ağ trafiğinde ne DOM'da video linki bulunamadı.")
-
-                for video_url in candidates:
-                    log(f"  tarayıcı teşhis: video linki deneniyor -> {video_url[:150]}")
-                    try:
-                        resp = page.context.request.get(video_url)
-                    except Exception as exc:
-                        log(f"  tarayıcı teşhis: indirme isteği hatası: {exc}")
-                        continue
-                    body = resp.body() if resp.ok else b""
-                    log(f"  tarayıcı teşhis: indirme yanıtı HTTP {resp.status}, boyut {len(body)} bayt")
-                    if resp.ok and len(body) >= 100_000:
+                    body = base64.b64decode(result["b64"])
+                    log(f"  tarayıcı teşhis: sayfa-içi indirme -> {result['src'][:100]}, boyut {len(body)} bayt")
+                    if len(body) >= 100_000:
                         video_bytes = body
-                        break
-                    elif resp.ok:
+                    else:
                         log(f"  tarayıcı teşhis: içerik başı: {body[:200]!r}")
             except Exception as exc:
                 log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
