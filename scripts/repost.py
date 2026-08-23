@@ -365,8 +365,16 @@ def _select_best_dash_representations(html: str) -> Optional[dict]:
         .replace("\\n", "\n")
         .replace('\\"', '"')
     )
+    # Instagram bazı videolarda 1440x2560, hatta daha yükseğini de sunuyor —
+    # Reels için zaten fazlasıyla yeterli olan 1080x1920'nin üzerine çıkmak
+    # hem gereksiz hem de işlenmiş dosyayı Supabase'in obje boyutu limitini
+    # aşacak kadar büyütebiliyor (denendi: "Payload too large" hatası). Bu
+    # yüzden bu tavanın altındaki EN İYİ kaliteyi seçiyoruz.
+    MAX_VIDEO_HEIGHT = 1920
+
     reps = re.findall(r"<Representation\b([^>]*)>(.*?)</Representation>", raw, re.DOTALL)
     best_video = None
+    best_video_capped = None
     best_audio = None
     for attrs, body in reps:
         base_url_m = re.search(r"<BaseURL>([^<]+)</BaseURL>", body)
@@ -388,13 +396,19 @@ def _select_best_dash_representations(html: str) -> Optional[dict]:
             "width": int(width_m.group(1)) if width_m else None,
             "height": int(height_m.group(1)) if height_m else None,
         }
-        if "video" in mime and (not best_video or bandwidth > best_video["bandwidth"]):
-            best_video = entry
+        if "video" in mime:
+            if not best_video or bandwidth > best_video["bandwidth"]:
+                best_video = entry
+            if (entry["height"] or 0) <= MAX_VIDEO_HEIGHT and (
+                not best_video_capped or bandwidth > best_video_capped["bandwidth"]
+            ):
+                best_video_capped = entry
         elif "audio" in mime and (not best_audio or bandwidth > best_audio["bandwidth"]):
             best_audio = entry
-    if not best_video:
+    chosen_video = best_video_capped or best_video
+    if not chosen_video:
         return None
-    return {"video": best_video, "audio": best_audio}
+    return {"video": chosen_video, "audio": best_audio}
 
 
 def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
