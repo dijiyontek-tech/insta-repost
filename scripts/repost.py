@@ -163,8 +163,8 @@ def fetch_own_videos(limit: int = 50) -> list:
         f"diğer türler: {other_types or 'yok'}."
     )
     if no_url:
-        for it in no_url[:10]:
-            log(f"  media_url yok: {it['id']} — {it.get('permalink')}")
+        for it in no_url[:3]:
+            log(f"  ham veri: {json.dumps(it, ensure_ascii=False)}")
     return videos
 
 
