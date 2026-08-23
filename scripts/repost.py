@@ -255,38 +255,65 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
-            found = {}
+            seen_urls = []
 
             def handle_response(response):
-                if found.get("url"):
-                    return
                 ctype = response.headers.get("content-type", "")
                 if ".mp4" in response.url or "video/mp4" in ctype:
-                    found["url"] = response.url
+                    try:
+                        clen = int(response.headers.get("content-length", "0"))
+                    except ValueError:
+                        clen = 0
+                    if response.url not in [u for u, _ in seen_urls]:
+                        seen_urls.append((response.url, clen))
 
             page.on("response", handle_response)
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)
-                video_url = found.get("url")
-                if not video_url:
-                    try:
-                        video_url = page.eval_on_selector("video", "el => el.currentSrc || el.src")
-                    except Exception as exc:
-                        log(f"  tarayıcı teşhis: video DOM elemanı bulunamadı ({exc})")
-                        video_url = None
-                if video_url:
-                    log(f"  tarayıcı teşhis: video linki bulundu -> {video_url[:150]}")
-                    resp = page.context.request.get(video_url)
-                    log(f"  tarayıcı teşhis: indirme yanıtı HTTP {resp.status}, boyut {len(resp.body())} bayt")
-                    if resp.ok:
-                        body = resp.body()
-                        if len(body) >= 100_000:
-                            video_bytes = body
-                        else:
-                            log(f"  tarayıcı teşhis: içerik başı: {body[:200]!r}")
-                else:
+                page.wait_for_timeout(2000)
+                # Videoyu oynatmayı dene: bazı sayfalarda tam dosya isteği
+                # sadece playback tetiklenince yapılıyor, DASH segment/sidx
+                # isteklerinden ayırt etmek için currentSrc'yi de topluyoruz.
+                try:
+                    page.eval_on_selector("video", "el => { el.muted = true; el.play().catch(() => {}); }")
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+
+                dom_src = None
+                try:
+                    dom_src = page.eval_on_selector("video", "el => el.currentSrc || el.src")
+                except Exception as exc:
+                    log(f"  tarayıcı teşhis: video DOM elemanı bulunamadı ({exc})")
+
+                # Denenecek sıra: önce DOM'daki currentSrc (genelde tam,
+                # ilerlemeli indirilebilir dosya), sonra ağ trafiğinde
+                # yakalanan adaylar (büyük content-length'ten küçüğe doğru,
+                # zira küçük olanlar çoğunlukla sidx/segment index parçası).
+                candidates = []
+                if dom_src:
+                    candidates.append(dom_src)
+                for u, _clen in sorted(seen_urls, key=lambda x: -x[1]):
+                    if u not in candidates:
+                        candidates.append(u)
+
+                if not candidates:
                     log("  tarayıcı teşhis: ne ağ trafiğinde ne DOM'da video linki bulunamadı.")
+
+                for video_url in candidates:
+                    log(f"  tarayıcı teşhis: video linki deneniyor -> {video_url[:150]}")
+                    try:
+                        resp = page.context.request.get(video_url)
+                    except Exception as exc:
+                        log(f"  tarayıcı teşhis: indirme isteği hatası: {exc}")
+                        continue
+                    body = resp.body() if resp.ok else b""
+                    log(f"  tarayıcı teşhis: indirme yanıtı HTTP {resp.status}, boyut {len(body)} bayt")
+                    if resp.ok and len(body) >= 100_000:
+                        video_bytes = body
+                        break
+                    elif resp.ok:
+                        log(f"  tarayıcı teşhis: içerik başı: {body[:200]!r}")
             except Exception as exc:
                 log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
             browser.close()
