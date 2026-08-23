@@ -238,6 +238,58 @@ def _download_bytes(url: str, referer: str = "https://www.instagram.com/") -> Op
     return r.content
 
 
+def _mux_captured_groups(groups: list) -> Optional[bytes]:
+    """Tarayıcıdan yakalanan bir veya birden fazla parça grubunu (video-only,
+    audio-only veya zaten muxlanmış tek grup) tek bir oynatılabilir mp4'e
+    dönüştürür. Instagram bazı videolarda ses ve görüntüyü ayrı
+    SourceBuffer'lara (dolayısıyla ayrı fragmented mp4 akışlarına) veriyor;
+    bunları ffmpeg ile birleştirmemiz gerekiyor."""
+    if not groups:
+        return None
+    if len(groups) == 1:
+        return groups[0]["body"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        inputs = []
+        for i, g in enumerate(groups):
+            p = tmp_path / f"part{i}.mp4"
+            p.write_bytes(g["body"])
+            inputs.append(p)
+
+        video_idx = audio_idx = None
+        for i, g in enumerate(groups):
+            mime = g["mime"].lower()
+            if "audio" in mime and audio_idx is None:
+                audio_idx = i
+            elif audio_idx != i and video_idx is None:
+                video_idx = i
+        if video_idx is None:
+            video_idx = max(range(len(groups)), key=lambda i: groups[i]["body"].__len__())
+        if audio_idx is None or audio_idx == video_idx:
+            return groups[video_idx]["body"]
+
+        out_path = tmp_path / "muxed.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(inputs[video_idx]),
+            "-i", str(inputs[audio_idx]),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c", "copy", "-shortest",
+            str(out_path),
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as exc:
+            log(f"  tarayıcı teşhis: ses/görüntü birleştirme (mux) hatası: {exc}")
+            return groups[video_idx]["body"]
+        if r.returncode != 0 or not out_path.exists():
+            log(f"  tarayıcı teşhis: mux başarısız, sadece video akışı kullanılacak. ffmpeg: {r.stderr[-500:]}")
+            return groups[video_idx]["body"]
+        log("  tarayıcı teşhis: ses ve görüntü akışları başarıyla birleştirildi (mux).")
+        return out_path.read_bytes()
+
+
 def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
     """Yavaş ama daha güvenilir yol: gerçek bir (headless) tarayıcı ile
     sayfayı işletir, videonun gerçek dosya isteğini ağ trafiğinden yakalar
@@ -265,13 +317,25 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
         if (window.__igPatched) return;
         window.__igPatched = true;
         window.__igBlobMap = new Map();
-        window.__igChunks = [];
+        window.__igBufferMime = new WeakMap();
+        window.__igChunksByMime = new Map();
         const origCreate = URL.createObjectURL.bind(URL);
         URL.createObjectURL = function(obj) {
             const url = origCreate(obj);
             window.__igBlobMap.set(url, obj);
             return url;
         };
+        if (window.MediaSource) {
+            const origAdd = MediaSource.prototype.addSourceBuffer;
+            MediaSource.prototype.addSourceBuffer = function(mimeType) {
+                const sb = origAdd.call(this, mimeType);
+                window.__igBufferMime.set(sb, mimeType || 'unknown');
+                if (!window.__igChunksByMime.has(mimeType)) {
+                    window.__igChunksByMime.set(mimeType, []);
+                }
+                return sb;
+            };
+        }
         if (window.SourceBuffer) {
             const origAppend = SourceBuffer.prototype.appendBuffer;
             SourceBuffer.prototype.appendBuffer = function(data) {
@@ -281,7 +345,11 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
                     else if (ArrayBuffer.isView(data)) {
                         ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
                     }
-                    if (ab) window.__igChunks.push(ab);
+                    if (ab) {
+                        const mime = window.__igBufferMime.get(this) || 'unknown';
+                        if (!window.__igChunksByMime.has(mime)) window.__igChunksByMime.set(mime, []);
+                        window.__igChunksByMime.get(mime).push(ab);
+                    }
                 } catch (e) {}
                 return origAppend.apply(this, arguments);
             };
@@ -325,21 +393,24 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
             try {
                 const buf = await obj.arrayBuffer();
                 const bytes = new Uint8Array(buf);
-                return {src, method: 'blob', size: bytes.length, b64: toB64(bytes)};
+                return {src, method: 'blob', groups: [{mime: 'blob', size: bytes.length, b64: toB64(bytes)}]};
             } catch (e) {
                 return {src, error: 'blob-read-failed: ' + String(e)};
             }
         }
 
-        const chunks = window.__igChunks || [];
-        if (chunks.length) {
+        const byMime = window.__igChunksByMime || new Map();
+        const groups = [];
+        for (const [mime, chunks] of byMime.entries()) {
+            if (!chunks.length) continue;
             let total = 0;
             for (const c of chunks) total += c.byteLength;
             const merged = new Uint8Array(total);
             let offset = 0;
             for (const c of chunks) { merged.set(new Uint8Array(c), offset); offset += c.byteLength; }
-            return {src, method: 'sourcebuffer', size: merged.length, b64: toB64(merged)};
+            groups.push({mime, size: merged.length, b64: toB64(merged)});
         }
+        if (groups.length) return {src, method: 'sourcebuffer', groups};
 
         return {src, error: 'no-blob-and-no-sourcebuffer-chunks'};
     }
@@ -359,17 +430,22 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
                     log("  tarayıcı teşhis: beklenmeyen boş sonuç.")
                 elif result.get("error"):
                     log(f"  tarayıcı teşhis: {result.get('src', '?')[:80]} -> {result['error']}")
-                elif result.get("b64"):
+                elif result.get("groups"):
                     import base64
 
-                    body = base64.b64decode(result["b64"])
-                    log(
-                        f"  tarayıcı teşhis: [{result['method']}] {result['src'][:100]}, boyut {len(body)} bayt"
-                    )
-                    if len(body) >= 100_000:
-                        video_bytes = body
-                    else:
-                        log(f"  tarayıcı teşhis: içerik başı: {body[:200]!r}")
+                    groups = []
+                    for g in result["groups"]:
+                        body = base64.b64decode(g["b64"])
+                        groups.append({"mime": g["mime"], "body": body})
+                        log(
+                            f"  tarayıcı teşhis: [{result['method']}] mime={g['mime']!r} boyut {len(body)} bayt"
+                        )
+                    groups = [g for g in groups if len(g["body"]) >= 20_000]
+                    muxed = _mux_captured_groups(groups)
+                    if muxed and len(muxed) >= 100_000:
+                        video_bytes = muxed
+                    elif muxed:
+                        log(f"  tarayıcı teşhis: birleştirilmiş dosya çok küçük ({len(muxed)} bayt), atlanıyor.")
             except Exception as exc:
                 log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
             browser.close()
