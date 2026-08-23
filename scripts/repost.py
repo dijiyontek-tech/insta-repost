@@ -101,21 +101,24 @@ def save_state(state: dict) -> None:
 def acquire_lock(timeout_s: int = 90) -> bool:
     """Aynı anda iki çalıştırmanın (ör. zamanlanmış tetikleme + elle test)
     aynı videoyu seçip iki kez paylaşmasını önlemek için basit bir Supabase
-    tabanlı kilit. Kilit dosyası x-upsert:false ile oluşturulmaya çalışılır
-    — dosya zaten varsa bu istek başarısız olur (atomik "sadece yoksa
-    oluştur"). Kilit LOCK_STALE_SECONDS'tan eskiyse (önceki çalışma çökmüş
-    demektir) devralınır; değilse kısa bir süre beklenip tekrar denenir."""
+    tabanlı kilit. Kilit dosyası POST (upload, x-upsert:false) ile
+    oluşturulmaya çalışılır — dosya zaten varsa bu istek başarısız olur
+    (atomik "sadece yoksa oluştur"; PUT burada İŞE YARAMIYOR çünkü
+    Supabase Storage'da PUT x-upsert bayrağından bağımsız her zaman
+    üzerine yazıyor, test ederek doğrulandı). Kilit LOCK_STALE_SECONDS'tan
+    eskiyse (önceki çalışma çökmüş demektir) devralınır; değilse kısa bir
+    süre beklenip tekrar denenir."""
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{LOCK_PATH}"
     token = f"{os.getpid()}-{random.randint(0, 1_000_000)}"
     deadline = time.time() + timeout_s
     while True:
         now = time.time()
-        put = requests.put(
+        post = requests.post(
             url,
             headers={**supabase_headers(), "Content-Type": "application/json", "x-upsert": "false"},
             data=json.dumps({"locked_at": now, "token": token}).encode("utf-8"),
         )
-        if put.status_code in (200, 201):
+        if post.status_code in (200, 201):
             # Yarış koşuluna karşı doğrulama: kilidi biz mi tutuyoruz?
             check = requests.get(url, headers=supabase_headers())
             if check.status_code == 200 and check.json().get("token") == token:
