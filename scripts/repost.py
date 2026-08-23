@@ -515,11 +515,18 @@ def main() -> None:
         src = Path(tmp) / "source.mp4"
         dst = Path(tmp) / "processed.mp4"
 
-        r = requests.get(video_url, headers=_BROWSER_HEADERS, stream=True)
+        download_headers = {**_BROWSER_HEADERS, "Referer": "https://www.instagram.com/"}
+        r = requests.get(video_url, headers=download_headers, stream=True)
         raise_for_status_verbose(r)
         with open(src, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
+
+        if src.stat().st_size < 100_000:
+            raise RuntimeError(
+                f"İndirilen dosya çok küçük ({src.stat().st_size} bayt) — muhtemelen video "
+                "değil, hata sayfası indirilmiş (Referer/CDN erişim sorunu)."
+            )
 
         process_video(src, dst)
         public_url = upload_video(dst, remote_name)
