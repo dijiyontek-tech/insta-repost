@@ -277,12 +277,12 @@ def _fetch_download_url_from_html(permalink: str) -> Optional[str]:
     return None
 
 
-def _download_bytes(url: str, referer: str = "https://www.instagram.com/") -> Optional[bytes]:
+def _download_bytes(url: str, referer: str = "https://www.instagram.com/", min_size: int = 100_000) -> Optional[bytes]:
     try:
         r = requests.get(url, headers={**_BROWSER_HEADERS, "Referer": referer}, timeout=60)
     except requests.RequestException:
         return None
-    if not r.ok or len(r.content) < 100_000:
+    if not r.ok or len(r.content) < min_size:
         return None
     return r.content
 
@@ -339,181 +339,130 @@ def _mux_captured_groups(groups: list) -> Optional[bytes]:
         return out_path.read_bytes()
 
 
+def _select_best_dash_representations(html: str) -> Optional[dict]:
+    """Sayfa HTML'ine JS tarafından gömülen DASH manifestini (video_dash_manifest)
+    ayrıştırıp en yüksek bant genişlikli video ve ses temsillerinin BaseURL'lerini
+    döndürür. Bu URL'ler kendinden imzalı (self-signed) olduğundan normal bir
+    requests.get() ile, tarayıcı oturumu/çerez gerekmeden indirilebiliyor —
+    doğrulandı: 540x960 yerine gerçek 1080x1920'yi bu şekilde alabiliyoruz."""
+    key = '"video_dash_manifest":"'
+    idx = html.find(key)
+    if idx == -1:
+        return None
+    start = idx + len(key)
+    end = start
+    while True:
+        end = html.find('"', end + 1)
+        if end == -1:
+            return None
+        if html[end - 1] != "\\":
+            break
+    raw = html[start:end]
+    raw = (
+        raw.replace("\\u003C", "<")
+        .replace("\\u003E", ">")
+        .replace("\\/", "/")
+        .replace("\\n", "\n")
+        .replace('\\"', '"')
+    )
+    reps = re.findall(r"<Representation\b([^>]*)>(.*?)</Representation>", raw, re.DOTALL)
+    best_video = None
+    best_audio = None
+    for attrs, body in reps:
+        base_url_m = re.search(r"<BaseURL>([^<]+)</BaseURL>", body)
+        if not base_url_m:
+            continue
+        url = base_url_m.group(1).replace("&amp;", "&")
+        mime_m = re.search(r'mimeType="([^"]*)"', attrs)
+        mime = mime_m.group(1) if mime_m else ""
+        bandwidth_m = re.search(r'\bbandwidth="(\d+)"', attrs)
+        bandwidth = int(bandwidth_m.group(1)) if bandwidth_m else 0
+        # Not: "width" niteliğini regex'le ararken "bandwidth" içindeki
+        # "width" alt dizesiyle karışmaması için harf öncesi olmadığını
+        # kontrol ediyoruz.
+        width_m = re.search(r'(?<![a-zA-Z])width="(\d+)"', attrs)
+        height_m = re.search(r'\bheight="(\d+)"', attrs)
+        entry = {
+            "url": url,
+            "bandwidth": bandwidth,
+            "width": int(width_m.group(1)) if width_m else None,
+            "height": int(height_m.group(1)) if height_m else None,
+        }
+        if "video" in mime and (not best_video or bandwidth > best_video["bandwidth"]):
+            best_video = entry
+        elif "audio" in mime and (not best_audio or bandwidth > best_audio["bandwidth"]):
+            best_audio = entry
+    if not best_video:
+        return None
+    return {"video": best_video, "audio": best_audio}
+
+
 def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
-    """Yavaş ama daha güvenilir yol: gerçek bir (headless) tarayıcı ile
-    sayfayı işletir, videonun gerçek dosya isteğini ağ trafiğinden yakalar
-    ve dosyayı AYNI tarayıcı oturumunun (çerezleri dahil) isteğiyle indirir
-    — Instagram'ın CDN'i çerezsiz/oturumsuz isteklere boş/hata sayfası
-    döndürüyor, bu yüzden ayrı bir requests.get() işe yaramıyor."""
+    """media_url'in Graph API'de olmadığı videolar için: gerçek bir
+    (headless) tarayıcı ile sayfayı yükleyip JS tarafından gömülen DASH
+    manifestini okur ve sunulan kalite seviyeleri arasından EN YÜKSEK bant
+    genişlikli video + ses temsillerini seçip doğrudan indirir.
+
+    Not: bu veri sadece gerçek bir tarayıcıda JS çalıştırılınca oluşuyor —
+    düz bir requests.get() ile sayfa HTML'inde bulunmuyor (test edildi).
+    Ama Instagram'ın kendi oynatıcısının seçtiği/oynattığı akışı yakalamaya
+    çalışmak (önceki yöntem) EN DÜŞÜK kaliteyi veriyordu, çünkü adaptif
+    bitrate algoritması bağlantıyı test etmek için başlangıçta bilerek en
+    düşük kaliteyi seçiyor (ör. 540x960). Bunun yerine manifesti kendimiz
+    okuyup en iyi kaliteyi (ör. 1080x1920) seçiyoruz — hem daha hızlı hem
+    çok daha kaliteli."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         log("UYARI: playwright kurulu değil, tarayıcı tabanlı indirme atlanıyor.")
         return None
 
-    # Instagram videoyu blob: URL üzerinden oynatıyor. Sayfa içinden bu
-    # blob: URL'i fetch() ile çekmeye çalışmak Instagram'ın CSP'si tarafından
-    # engelleniyor ("TypeError: Failed to fetch"). Ham ağ segmentlerini
-    # birleştirmeye çalışmak da işe yaramıyor çünkü tek bir segment isteği
-    # (moof/mdat) başlangıç (init/moov) atomunu içermiyor ("could not find
-    # corresponding trex"). Çözüm: `URL.createObjectURL` ve
-    # `SourceBuffer.appendBuffer`'ı sayfa yüklenmeden ÖNCE yamalayıp asıl
-    # Blob/MediaSource nesnesini veya MSE'ye eklenen ham parçaları
-    # yakalıyoruz — bunlar ağ isteği değil, bellek-içi işlemler olduğu için
-    # CSP'den etkilenmiyor.
-    js_init = """
-    (() => {
-        if (window.__igPatched) return;
-        window.__igPatched = true;
-        window.__igBlobMap = new Map();
-        window.__igBufferMime = new WeakMap();
-        window.__igChunksByMime = new Map();
-        const origCreate = URL.createObjectURL.bind(URL);
-        URL.createObjectURL = function(obj) {
-            const url = origCreate(obj);
-            window.__igBlobMap.set(url, obj);
-            return url;
-        };
-        if (window.MediaSource) {
-            const origAdd = MediaSource.prototype.addSourceBuffer;
-            MediaSource.prototype.addSourceBuffer = function(mimeType) {
-                const sb = origAdd.call(this, mimeType);
-                window.__igBufferMime.set(sb, mimeType || 'unknown');
-                if (!window.__igChunksByMime.has(mimeType)) {
-                    window.__igChunksByMime.set(mimeType, []);
-                }
-                return sb;
-            };
-        }
-        if (window.SourceBuffer) {
-            const origAppend = SourceBuffer.prototype.appendBuffer;
-            SourceBuffer.prototype.appendBuffer = function(data) {
-                try {
-                    let ab = null;
-                    if (data instanceof ArrayBuffer) ab = data.slice(0);
-                    else if (ArrayBuffer.isView(data)) {
-                        ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-                    }
-                    if (ab) {
-                        const mime = window.__igBufferMime.get(this) || 'unknown';
-                        if (!window.__igChunksByMime.has(mime)) window.__igChunksByMime.set(mime, []);
-                        window.__igChunksByMime.get(mime).push(ab);
-                    }
-                } catch (e) {}
-                return origAppend.apply(this, arguments);
-            };
-        }
-    })();
-    """
-
-    js_extract = """
-    async () => {
-        const video = document.querySelector('video');
-        if (!video) return {error: 'no-video-element'};
-        await new Promise(resolve => {
-            if (video.readyState >= 2) return resolve();
-            video.addEventListener('loadeddata', resolve, {once: true});
-            setTimeout(resolve, 8000);
-        });
-        try { video.muted = true; await video.play(); } catch (e) {}
-        const dur = video.duration;
-        if (isFinite(dur) && dur > 0) {
-            for (const frac of [0.3, 0.6, 0.9, 0.99]) {
-                try {
-                    video.currentTime = dur * frac;
-                    await new Promise(r => setTimeout(r, 800));
-                } catch (e) {}
-            }
-        }
-        await new Promise(r => setTimeout(r, 1500));
-
-        const toB64 = (bytes) => {
-            let binary = '';
-            const chunkSize = 0x8000;
-            for (let i = 0; i < bytes.length; i += chunkSize) {
-                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-            }
-            return btoa(binary);
-        };
-
-        const src = video.currentSrc || video.src;
-        const obj = src ? window.__igBlobMap.get(src) : null;
-        if (obj && typeof obj.arrayBuffer === 'function') {
-            try {
-                const buf = await obj.arrayBuffer();
-                const bytes = new Uint8Array(buf);
-                return {src, method: 'blob', groups: [{mime: 'blob', size: bytes.length, b64: toB64(bytes)}]};
-            } catch (e) {
-                return {src, error: 'blob-read-failed: ' + String(e)};
-            }
-        }
-
-        const byMime = window.__igChunksByMime || new Map();
-        const groups = [];
-        for (const [mime, chunks] of byMime.entries()) {
-            if (!chunks.length) continue;
-            let total = 0;
-            for (const c of chunks) total += c.byteLength;
-            const merged = new Uint8Array(total);
-            let offset = 0;
-            for (const c of chunks) { merged.set(new Uint8Array(c), offset); offset += c.byteLength; }
-            groups.push({mime, size: merged.length, b64: toB64(merged)});
-        }
-        if (groups.length) return {src, method: 'sourcebuffer', groups};
-
-        return {src, error: 'no-blob-and-no-sourcebuffer-chunks'};
-    }
-    """
-
-    video_bytes = None
+    html = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            # Instagram, video elemanının EKRANDA KAPLADIĞI alana göre adaptif
-            # bitrate/çözünürlük seçiyor. Varsayılan (küçük, yatay) pencere
-            # boyutuyla en düşük kaliteli akış seçilip indiriliyordu (ör.
-            # 526x936 gibi) — bu yüzden dikey, yüksek çözünürlüklü ve yüksek
-            # device-pixel-ratio'lu bir görünüm alanı ayarlayıp en yüksek
-            # kaliteli akışın seçilmesini sağlıyoruz.
-            page = browser.new_page(
-                user_agent=_BROWSER_HEADERS["User-Agent"],
-                viewport={"width": 1080, "height": 1920},
-                device_scale_factor=2,
-                is_mobile=True,
-                has_touch=True,
-            )
-            page.add_init_script(js_init)
+            page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
-                result = page.evaluate(js_extract)
-                if not result:
-                    log("  tarayıcı teşhis: beklenmeyen boş sonuç.")
-                elif result.get("error"):
-                    log(f"  tarayıcı teşhis: {result.get('src', '?')[:80]} -> {result['error']}")
-                elif result.get("groups"):
-                    import base64
-
-                    groups = []
-                    for g in result["groups"]:
-                        body = base64.b64decode(g["b64"])
-                        groups.append({"mime": g["mime"], "body": body})
-                        log(
-                            f"  tarayıcı teşhis: [{result['method']}] mime={g['mime']!r} boyut {len(body)} bayt"
-                        )
-                    groups = [g for g in groups if len(g["body"]) >= 20_000]
-                    muxed = _mux_captured_groups(groups)
-                    if muxed and len(muxed) >= 100_000:
-                        video_bytes = muxed
-                    elif muxed:
-                        log(f"  tarayıcı teşhis: birleştirilmiş dosya çok küçük ({len(muxed)} bayt), atlanıyor.")
+                page.wait_for_timeout(2500)
+                html = page.content()
             except Exception as exc:
-                log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
+                log(f"UYARI: tarayıcı ile sayfa yükleme hatası: {exc}")
             browser.close()
     except Exception as exc:
         log(f"UYARI: tarayıcı başlatma hatası: {exc}")
         return None
-    return video_bytes
+
+    if not html:
+        return None
+
+    reps = _select_best_dash_representations(html)
+    if not reps:
+        log("  tarayıcı teşhis: sayfada DASH manifesti bulunamadı.")
+        return None
+
+    video_rep = reps["video"]
+    video_body = _download_bytes(video_rep["url"], min_size=20_000)
+    if not video_body:
+        log("  tarayıcı teşhis: en yüksek kaliteli video akışı indirilemedi.")
+        return None
+    log(
+        f"  tarayıcı teşhis: video akışı indirildi "
+        f"({video_rep.get('width')}x{video_rep.get('height')}, bw={video_rep['bandwidth']}), "
+        f"boyut {len(video_body)} bayt"
+    )
+
+    groups = [{"mime": "video/mp4", "body": video_body}]
+    audio_rep = reps.get("audio")
+    if audio_rep:
+        audio_body = _download_bytes(audio_rep["url"], min_size=1_000)
+        if audio_body:
+            log(f"  tarayıcı teşhis: ses akışı indirildi, boyut {len(audio_body)} bayt")
+            groups.append({"mime": "audio/mp4", "body": audio_body})
+        else:
+            log("  tarayıcı teşhis: ses akışı indirilemedi, sessiz video kullanılacak.")
+
+    return _mux_captured_groups(groups)
 
 
 def fetch_video_bytes(candidate: dict) -> Optional[bytes]:
