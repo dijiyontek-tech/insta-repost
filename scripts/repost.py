@@ -683,37 +683,39 @@ def main() -> None:
             log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
         return
 
-    # Sıradaki en uygun videodan başlayıp, indirilebilen bir video bulana
-    # kadar dener (media_url yoksa yedek yöntemler çalışır, onlar da
-    # başarısız olursa sıradaki video denenir — tek bir video yüzünden
-    # çalıştırma boşa gitmez).
+    # Sıradaki en uygun videodan başlayıp, indirilip İŞLENEBİLEN bir video
+    # bulana kadar dener (media_url yoksa yedek yöntemler çalışır, indirilen
+    # dosya ffmpeg ile açılamazsa da sıradaki video denenir — tek bir video
+    # yüzünden çalıştırma boşa gitmez).
     candidate = None
-    video_bytes = None
+    public_url = None
+    remote_name = None
     for v in ordered:
         data = fetch_video_bytes(v)
-        if data:
-            candidate = v
-            video_bytes = data
-            break
-        log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
+        if not data:
+            log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
+            continue
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source.mp4"
+            dst = Path(tmp) / "processed.mp4"
+            src.write_bytes(data)
+            try:
+                process_video(src, dst)
+            except subprocess.CalledProcessError as exc:
+                log(f"UYARI: {v['id']} işlenemedi (ffmpeg hatası: {exc}), sıradaki video deneniyor.")
+                continue
+            remote_name = f"{v['id']}-{int(time.time())}.mp4"
+            public_url = upload_video(dst, remote_name)
+            log(f"Video Supabase'e yüklendi: {public_url}")
+        candidate = v
+        break
 
     if not candidate:
-        log("Uygun videolardan hiçbiri indirilemedi.")
+        log("Uygun videolardan hiçbiri indirilip işlenemedi.")
         return
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
-
-    remote_name = f"{candidate['id']}-{int(time.time())}.mp4"
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "source.mp4"
-        dst = Path(tmp) / "processed.mp4"
-
-        src.write_bytes(video_bytes)
-
-        process_video(src, dst)
-        public_url = upload_video(dst, remote_name)
-        log(f"Video Supabase'e yüklendi: {public_url}")
 
     # CAPTION_SUFFIX ayarlıysa paylaşımın tam metni olarak kullanılır (orijinal
     # caption'ın yerine geçer); ayarlı değilse orijinal caption aynen kullanılır.
