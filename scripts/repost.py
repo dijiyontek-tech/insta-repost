@@ -143,6 +143,7 @@ def fetch_own_videos(limit: int = 50) -> list:
         "access_token": IG_ACCESS_TOKEN,
     }
     items = []
+    pages = 0
     while url:
         r = requests.get(url, params=params)
         raise_for_status_verbose(r)
@@ -150,20 +151,24 @@ def fetch_own_videos(limit: int = 50) -> list:
         items.extend(data.get("data", []))
         url = data.get("paging", {}).get("next")
         params = None  # 'next' URL zaten tüm query'yi içeriyor
-    return [
+        pages += 1
+    videos = [
         it for it in items
         if (it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS")
         and it.get("media_url")
     ]
+    log(f"Toplam {len(items)} medya ({pages} sayfa), bunlardan {len(videos)} tanesi video/Reels.")
+    return videos
 
 
 def fetch_view_count(media_id: str) -> int:
     """Insights API'den gerçek izlenme sayısını (views) çeker. Bu ayrı bir
     izin (instagram_business_manage_insights) gerektirir. Hata olursa 0 döner
-    (o video sıralamada en sona düşer, script çökmez)."""
+    (o video sıralamada en sona düşer, script çökmez) ama hatayı loglar."""
     url = f"{GRAPH_BASE}/{media_id}/insights"
     r = requests.get(url, params={"metric": "views", "access_token": IG_ACCESS_TOKEN})
     if not r.ok:
+        log(f"UYARI: {media_id} için izlenme alınamadı — HTTP {r.status_code}: {r.text[:300]}")
         return 0
     for metric in r.json().get("data", []):
         if metric.get("name") == "views":
@@ -337,8 +342,10 @@ def main() -> None:
         for v in videos:
             v["view_count"] = view_counts.get(v["id"], 0)
         by_views = sorted(videos, key=lambda v: v.get("view_count", 0), reverse=True)
-        top5 = ", ".join(f"{v['id']}:{v.get('view_count')}" for v in by_views[:5])
-        log(f"En yüksek 5 izlenme değeri (id:views): {top5}")
+        top15 = "\n".join(
+            f"  {v.get('view_count')} — {v['id']} — {v.get('permalink')}" for v in by_views[:15]
+        )
+        log(f"En yüksek 15 izlenme değeri:\n{top15}")
         pool = [v for v in videos if (v.get("view_count") or 0) >= MIN_VIEW_COUNT]
         pool.sort(key=lambda v: v.get("view_count", 0), reverse=True)
 
