@@ -37,6 +37,8 @@ SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "insta-repost")
 
 STATE_PATH = "state/processed.json"
+LOCK_PATH = "state/lock.json"
+LOCK_STALE_SECONDS = 600
 MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
@@ -94,6 +96,49 @@ def save_state(state: dict) -> None:
         data=json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"),
     )
     raise_for_status_verbose(r)
+
+
+def acquire_lock(timeout_s: int = 90) -> bool:
+    """Aynı anda iki çalıştırmanın (ör. zamanlanmış tetikleme + elle test)
+    aynı videoyu seçip iki kez paylaşmasını önlemek için basit bir Supabase
+    tabanlı kilit. Kilit dosyası x-upsert:false ile oluşturulmaya çalışılır
+    — dosya zaten varsa bu istek başarısız olur (atomik "sadece yoksa
+    oluştur"). Kilit LOCK_STALE_SECONDS'tan eskiyse (önceki çalışma çökmüş
+    demektir) devralınır; değilse kısa bir süre beklenip tekrar denenir."""
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{LOCK_PATH}"
+    token = f"{os.getpid()}-{random.randint(0, 1_000_000)}"
+    deadline = time.time() + timeout_s
+    while True:
+        now = time.time()
+        put = requests.put(
+            url,
+            headers={**supabase_headers(), "Content-Type": "application/json", "x-upsert": "false"},
+            data=json.dumps({"locked_at": now, "token": token}).encode("utf-8"),
+        )
+        if put.status_code in (200, 201):
+            # Yarış koşuluna karşı doğrulama: kilidi biz mi tutuyoruz?
+            check = requests.get(url, headers=supabase_headers())
+            if check.status_code == 200 and check.json().get("token") == token:
+                return True
+        else:
+            r = requests.get(url, headers=supabase_headers())
+            locked_at = 0
+            if r.status_code == 200:
+                try:
+                    locked_at = r.json().get("locked_at", 0)
+                except Exception:
+                    locked_at = 0
+            if now - locked_at > LOCK_STALE_SECONDS:
+                requests.delete(url, headers=supabase_headers())
+                continue
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
+
+
+def release_lock() -> None:
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{LOCK_PATH}"
+    requests.delete(url, headers=supabase_headers())
 
 
 def upload_video(local_path: Path, remote_name: str) -> str:
@@ -595,6 +640,21 @@ def get_view_counts(state: dict, videos: list) -> dict:
 # ---------- Ana akış ----------
 
 def main() -> None:
+    # Zamanlanmış (cron) ve elle tetiklenen çalıştırmalar aynı ana denk
+    # gelirse, ikisi de aynı "henüz kullanılmamış" videoyu seçip iki kez
+    # paylaşabiliyordu (state okuma/yazma arasında yarış durumu). Bunu
+    # önlemek için tüm state okuma/seçme/yazma süresince basit bir kilit
+    # tutuyoruz.
+    if not acquire_lock(timeout_s=300):
+        log("UYARI: başka bir çalıştırma zaten sürüyor (kilit alınamadı), bu çalıştırma atlanıyor.")
+        return
+    try:
+        _run()
+    finally:
+        release_lock()
+
+
+def _run() -> None:
     cleanup_old_videos()
     state = load_state()
 
