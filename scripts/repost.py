@@ -610,7 +610,11 @@ def main() -> None:
     # paylaşabiliyordu (state okuma/yazma arasında yarış durumu). Bunu
     # önlemek için tüm state okuma/seçme/yazma süresince basit bir kilit
     # tutuyoruz.
-    if not acquire_lock(timeout_s=300):
+    # ÖNEMLİ: bu süre LOCK_STALE_SECONDS'tan (600s) uzun olmalı — kısaysa,
+    # gerçekten sıkışmış (ör. runner çökmesiyle serbest bırakılmamış) bir
+    # kilit hiçbir zaman "bayat" eşiğine ulaşmadan bu bekleme süresi
+    # dolup vazgeçiliyor, yani otomatik kendini onarma hiç devreye girmiyor.
+    if not acquire_lock(timeout_s=LOCK_STALE_SECONDS + 60):
         log("UYARI: başka bir çalıştırma zaten sürüyor (kilit alınamadı), bu çalıştırma atlanıyor.")
         return
     try:
