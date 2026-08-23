@@ -588,10 +588,36 @@ def process_video(src: Path, dst: Path) -> None:
         "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
         "-af", f"atempo={speed}",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+    ]
+    # Artık kaynağı gerçek yüksek çözünürlükte (1080x1920'ye kadar) indirdiğimiz
+    # için uzun videolarda sabit CRF çıktısı Supabase'in obje boyutu limitini
+    # ("Payload too large") aşabiliyor. Videonun süresine göre bir üst bitrate
+    # sınırı (VBV) uygulayıp toplam boyutu güvenli bir tavanın altında tutuyoruz
+    # — kısa videolarda bu tavana hiç dokunulmuyor, kalite CRF'ten geliyor.
+    duration = _probe_duration_seconds(src)
+    audio_bitrate = 192_000
+    if duration and duration > 0:
+        max_upload_bytes = 45 * 1024 * 1024
+        target_total_bps = (max_upload_bytes * 8) / duration
+        video_bitrate_cap = max(int(target_total_bps - audio_bitrate), 800_000)
+        cmd += ["-maxrate", str(video_bitrate_cap), "-bufsize", str(video_bitrate_cap * 2)]
+    cmd += [
         "-c:a", "aac", "-b:a", "192k",
         str(dst),
     ]
     subprocess.run(cmd, check=True)
+
+
+def _probe_duration_seconds(path: Path) -> Optional[float]:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return None
 
 
 VIEW_COUNT_CACHE_TTL = 6 * 3600  # saniye
@@ -749,7 +775,11 @@ def _run() -> None:
                 log(f"UYARI: {v['id']} işlenemedi (ffmpeg hatası: {exc}), sıradaki video deneniyor.")
                 continue
             remote_name = f"{v['id']}-{int(time.time())}.mp4"
-            public_url = upload_video(dst, remote_name)
+            try:
+                public_url = upload_video(dst, remote_name)
+            except requests.HTTPError as exc:
+                log(f"UYARI: {v['id']} Supabase'e yüklenemedi ({exc}), sıradaki video deneniyor.")
+                continue
             log(f"Video Supabase'e yüklendi: {public_url}")
         candidate = v
         break
