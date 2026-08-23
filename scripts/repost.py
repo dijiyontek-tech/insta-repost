@@ -43,10 +43,11 @@ MAX_REPOSTS_PER_VIDEO = int(os.environ.get("MAX_REPOSTS_PER_VIDEO", "1"))
 CAPTION_SUFFIX = os.environ.get("CAPTION_SUFFIX", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
 # "random", "most_liked" ya da "top_viewed_cycle" (izlenmesi en yüksekten
-# en düşüğe doğru, MIN_VIEW_COUNT eşiğinin altına inmeden döner; eşiğin
-# altındaki tüm videolar tüketilince baştan başlar).
+# en düşüğe doğru; bir tur tüketilince baştan başlar). Düşük izlenmeli bir
+# video, deneme (trial) olarak yeniden paylaşılınca da düşük izlenecek diye
+# bir kural yok, bu yüzden alt sınır uygulanmıyor — tüm videolar dahil.
 MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
-MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "10000"))
+MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "0"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
 # Instagram'ın kendi günlük paylaşım limitine (~25) yaklaşınca kalan
 # çalıştırmalar indirme/işleme yapmadan sessizce atlanır.

@@ -59,7 +59,7 @@ jobs:
           MAX_REPOSTS_PER_VIDEO: "1"
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
-          MIN_VIEW_COUNT: "10000"
+          MIN_VIEW_COUNT: "0"
           RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
           TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
           # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
