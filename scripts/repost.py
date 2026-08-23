@@ -469,7 +469,19 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
+            # Instagram, video elemanının EKRANDA KAPLADIĞI alana göre adaptif
+            # bitrate/çözünürlük seçiyor. Varsayılan (küçük, yatay) pencere
+            # boyutuyla en düşük kaliteli akış seçilip indiriliyordu (ör.
+            # 526x936 gibi) — bu yüzden dikey, yüksek çözünürlüklü ve yüksek
+            # device-pixel-ratio'lu bir görünüm alanı ayarlayıp en yüksek
+            # kaliteli akışın seçilmesini sağlıyoruz.
+            page = browser.new_page(
+                user_agent=_BROWSER_HEADERS["User-Agent"],
+                viewport={"width": 1080, "height": 1920},
+                device_scale_factor=2,
+                is_mobile=True,
+                has_touch=True,
+            )
             page.add_init_script(js_init)
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
@@ -612,7 +624,7 @@ def process_video(src: Path, dst: Path) -> None:
         "ffmpeg", "-y", "-i", str(src),
         "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
         "-af", f"atempo={speed}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-c:a", "aac", "-b:a", "192k",
         str(dst),
     ]
