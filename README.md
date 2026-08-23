@@ -109,7 +109,9 @@ modunda çalışmaz — deneme modu yalnızca elle tetiklemede kullanılır.
   content" tespiti nedeniyle bazı videolarda daha düşük dağıtım
   görebilir — bu senin zaten manuel yaptığın ve işe yaradığını söylediğin
   bir strateji, script sadece elle yaptığını otomatikleştiriyor.
-- `media_url` alanı Graph API tarafında videonun orijinal CDN linkini
-  döner; bazı hesap/izin kombinasyonlarında bu alan boş dönebilir — ilk
-  testte bunu doğrula, boş dönerse bana söyle, alternatif bir indirme
-  yolu (ör. `permalink` üzerinden oEmbed) ekleriz.
+- Graph API bazı (özellikle çok yüksek performanslı) videolar için
+  `media_url` hiç vermiyor — script bu durumda videonun herkese açık
+  sayfasını (permalink) okuyup dosya linkini kendisi bulmaya çalışır. Bu
+  yedek yöntem Instagram'ın sayfa yapısına bağlı olduğundan, Instagram
+  bunu değiştirirse zaman zaman bozulup tamir gerektirebilir — resmi API
+  gibi garantili değildir.

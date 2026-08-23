@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-Kendi Instagram videolarini otomatik "remix"leyip (çevirme / hafif efekt /
-üst yazı değiştirme) yeniden Reels olarak paylaşan script.
+Kendi Instagram videolarini otomatik "remix"leyip (renk/kontrast/hız
+varyasyonu) yeniden Reels olarak paylaşan script.
 
-Sadece resmi Meta Graph API kullanır — kullanıcı adı/şifre ile giriş yoktur.
+Paylaşım tamamen resmi Meta Graph API ile yapılır — kullanıcı adı/şifre ile
+giriş yoktur. Kaynak videoyu indirmek için önce Graph API'nin verdiği
+media_url kullanılır; API bazı (özellikle çok yüksek performanslı) videolar
+için bu linki hiç vermiyor, o durumda videonun herkese açık sayfasından
+(permalink) dosya linkini bulan bir yedek yönteme düşülür.
 """
 import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -153,13 +159,15 @@ def fetch_own_videos(limit: int = 50) -> list:
         params = None  # 'next' URL zaten tüm query'yi içeriyor
         pages += 1
     is_video = lambda it: it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS"
-    videos = [it for it in items if is_video(it) and it.get("media_url")]
+    # media_url eksik olanları da havuza dahil ediyoruz — indirme anında
+    # fetch_download_url() permalink üzerinden yedek bir link bulmayı dener.
+    videos = [it for it in items if is_video(it) and it.get("permalink")]
 
-    no_url = [it for it in items if is_video(it) and not it.get("media_url")]
+    no_url = [it for it in videos if not it.get("media_url")]
     other_types = sorted({it.get("media_type", "?") for it in items if not is_video(it)})
     log(
-        f"Toplam {len(items)} medya ({pages} sayfa) — {len(videos)} video/Reels kullanılabilir, "
-        f"{len(no_url)} video media_url eksik olduğu için elendi, "
+        f"Toplam {len(items)} medya ({pages} sayfa) — {len(videos)} video/Reels bulundu, "
+        f"{len(no_url)} tanesinde media_url eksik (indirme anında yedek yöntem denenecek), "
         f"diğer türler: {other_types or 'yok'}."
     )
     target_id = os.environ.get("TARGET_MEDIA_ID", "").strip()
@@ -187,6 +195,49 @@ def fetch_view_count(media_id: str) -> int:
             if values:
                 return values[0].get("value", 0)
     return 0
+
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
+def fetch_download_url(candidate: dict) -> Optional[str]:
+    """Kaynak videonun indirilebilir linkini döndürür. Önce Graph API'nin
+    verdiği media_url'e bakar; yoksa videonun herkese açık sayfasından
+    (permalink) gerçek dosya linkini bulmaya çalışır (bazı çok yüksek
+    performanslı videolar için Graph API media_url hiç vermiyor)."""
+    if candidate.get("media_url"):
+        return candidate["media_url"]
+
+    permalink = candidate.get("permalink")
+    if not permalink:
+        return None
+
+    try:
+        r = requests.get(permalink, headers=_BROWSER_HEADERS, timeout=20)
+    except requests.RequestException as exc:
+        log(f"UYARI: {candidate['id']} sayfası alınamadı: {exc}")
+        return None
+    if not r.ok:
+        log(f"UYARI: {candidate['id']} sayfası HTTP {r.status_code} döndü.")
+        return None
+
+    html = r.text
+    match = re.search(r'<meta property="og:video(?::secure_url)?" content="([^"]+)"', html)
+    if match:
+        return match.group(1).replace("&amp;", "&")
+    match = re.search(r'"video_url":"([^"]+?)"', html)
+    if match:
+        try:
+            return match.group(1).encode().decode("unicode_escape")
+        except UnicodeDecodeError:
+            return match.group(1)
+    log(f"UYARI: {candidate['id']} sayfasında video linki bulunamadı (yedek yöntem de başarısız).")
+    return None
 
 
 def create_media_container(video_url: str, caption: str, trial: bool = False) -> str:
@@ -370,28 +421,40 @@ def main() -> None:
                 return 0
             return -1
 
-        candidate = next(
-            (v for v in pool if cycle_used_at(v) < cycle),
-            None,
-        )
-        if candidate is None and pool:
+        ordered = [v for v in pool if cycle_used_at(v) < cycle]
+        if not ordered and pool:
             cycle += 1
             state["_cycle"] = cycle
-            candidate = pool[0]
+            ordered = pool
     elif MEDIA_SELECTION == "most_liked":
-        eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
-        eligible.sort(key=lambda v: v.get("like_count", 0), reverse=True)
-        candidate = eligible[0] if eligible else None
+        ordered = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
+        ordered.sort(key=lambda v: v.get("like_count", 0), reverse=True)
     else:
-        eligible = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
-        random.shuffle(eligible)
-        candidate = eligible[0] if eligible else None
+        ordered = [v for v in videos if state.get(v["id"], {}).get("repost_count", 0) < MAX_REPOSTS_PER_VIDEO]
+        random.shuffle(ordered)
 
-    if not candidate:
+    if not ordered:
         if MEDIA_SELECTION == "top_viewed_cycle":
             log(f"{MIN_VIEW_COUNT} üzeri izlenmeye sahip video bulunamadı.")
         else:
             log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
+        return
+
+    # Sıradaki en uygun videodan başlayıp, indirilebilir bir link bulana kadar
+    # dener (media_url yoksa yedek yöntem çalışır, o da başarısız olursa
+    # sıradaki video denenir — tek bir video yüzünden çalıştırma boşa gitmez).
+    candidate = None
+    video_url = None
+    for v in ordered:
+        url = fetch_download_url(v)
+        if url:
+            candidate = v
+            video_url = url
+            break
+        log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
+
+    if not candidate:
+        log("Uygun videolardan hiçbiri indirilemedi (hepsi için link bulunamadı).")
         return
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
@@ -402,7 +465,7 @@ def main() -> None:
         src = Path(tmp) / "source.mp4"
         dst = Path(tmp) / "processed.mp4"
 
-        r = requests.get(candidate["media_url"], stream=True)
+        r = requests.get(video_url, headers=_BROWSER_HEADERS, stream=True)
         raise_for_status_verbose(r)
         with open(src, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
