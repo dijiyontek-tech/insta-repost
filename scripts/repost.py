@@ -288,6 +288,19 @@ def main() -> None:
     cleanup_old_videos()
     state = load_state()
 
+    if os.environ.get("RESET_CYCLE", "false").strip().lower() in ("1", "true", "yes"):
+        # Bakım komutu: geçmiş test karmaşasını (farklı modların birbirine
+        # karışmasından kalan last_cycle_used/_cycle izlerini) temizler,
+        # top_viewed_cycle'ı sıfırdan, temiz bir turla başlatır.
+        for entry in state.values():
+            if isinstance(entry, dict):
+                entry.pop("last_cycle_used", None)
+        state.pop("_cycle", None)
+        state.pop("_history", None)
+        save_state(state)
+        log("Tur takibi sıfırlandı, bir sonraki çalıştırma en yüksek izlenmeliden başlayacak.")
+        return
+
     today = date.today().isoformat()
     daily = state.get("_daily", {})
     if daily.get("date") != today:
@@ -328,8 +341,19 @@ def main() -> None:
         log(f"En yüksek 5 izlenme değeri (id:views): {top5}")
         pool = [v for v in videos if (v.get("view_count") or 0) >= MIN_VIEW_COUNT]
         pool.sort(key=lambda v: v.get("view_count", 0), reverse=True)
+
+        def cycle_used_at(v):
+            entry = state.get(v["id"], {})
+            if "last_cycle_used" in entry:
+                return entry["last_cycle_used"]
+            if entry.get("repost_count", 0) > 0:
+                # Bu video başka bir modla (ör. most_liked) zaten paylaşılmış —
+                # bu turda tekrar seçilmesin, bir sonraki turda uygun olsun.
+                return 0
+            return -1
+
         candidate = next(
-            (v for v in pool if state.get(v["id"], {}).get("last_cycle_used", -1) < cycle),
+            (v for v in pool if cycle_used_at(v) < cycle),
             None,
         )
         if candidate is None and pool:

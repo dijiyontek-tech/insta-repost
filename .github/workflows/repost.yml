@@ -20,6 +20,10 @@ on:
           - random
           - most_liked
         default: top_viewed_cycle
+      reset_cycle:
+        description: "Bakım: tur takibini sıfırla (video seçmez, paylaşım yapmaz)"
+        type: boolean
+        default: false
 
 jobs:
   repost:
@@ -49,6 +53,7 @@ jobs:
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
           MIN_VIEW_COUNT: "10000"
+          RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
           # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
           # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
           # bastırılıyor, deneme modu bunu aşmanın yolu).
