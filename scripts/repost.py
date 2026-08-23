@@ -152,12 +152,19 @@ def fetch_own_videos(limit: int = 50) -> list:
         url = data.get("paging", {}).get("next")
         params = None  # 'next' URL zaten tüm query'yi içeriyor
         pages += 1
-    videos = [
-        it for it in items
-        if (it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS")
-        and it.get("media_url")
-    ]
-    log(f"Toplam {len(items)} medya ({pages} sayfa), bunlardan {len(videos)} tanesi video/Reels.")
+    is_video = lambda it: it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS"
+    videos = [it for it in items if is_video(it) and it.get("media_url")]
+
+    no_url = [it for it in items if is_video(it) and not it.get("media_url")]
+    other_types = sorted({it.get("media_type", "?") for it in items if not is_video(it)})
+    log(
+        f"Toplam {len(items)} medya ({pages} sayfa) — {len(videos)} video/Reels kullanılabilir, "
+        f"{len(no_url)} video media_url eksik olduğu için elendi, "
+        f"diğer türler: {other_types or 'yok'}."
+    )
+    if no_url:
+        for it in no_url[:10]:
+            log(f"  media_url yok: {it['id']} — {it.get('permalink')}")
     return videos
 
 
