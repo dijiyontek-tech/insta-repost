@@ -160,7 +160,7 @@ def fetch_own_videos(limit: int = 50) -> list:
         pages += 1
     is_video = lambda it: it.get("media_type") == "VIDEO" or it.get("media_product_type") == "REELS"
     # media_url eksik olanları da havuza dahil ediyoruz — indirme anında
-    # fetch_download_url() permalink üzerinden yedek bir link bulmayı dener.
+    # fetch_video_bytes() permalink üzerinden yedek yollarla indirmeyi dener.
     videos = [it for it in items if is_video(it) and it.get("permalink")]
 
     no_url = [it for it in videos if not it.get("media_url")]
@@ -228,51 +228,76 @@ def _fetch_download_url_from_html(permalink: str) -> Optional[str]:
     return None
 
 
-def _fetch_download_url_via_browser(permalink: str) -> Optional[str]:
+def _download_bytes(url: str, referer: str = "https://www.instagram.com/") -> Optional[bytes]:
+    try:
+        r = requests.get(url, headers={**_BROWSER_HEADERS, "Referer": referer}, timeout=60)
+    except requests.RequestException:
+        return None
+    if not r.ok or len(r.content) < 100_000:
+        return None
+    return r.content
+
+
+def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
     """Yavaş ama daha güvenilir yol: gerçek bir (headless) tarayıcı ile
-    sayfayı işletir, videonun gerçek dosya isteğini ağ trafiğinden yakalar."""
+    sayfayı işletir, videonun gerçek dosya isteğini ağ trafiğinden yakalar
+    ve dosyayı AYNI tarayıcı oturumunun (çerezleri dahil) isteğiyle indirir
+    — Instagram'ın CDN'i çerezsiz/oturumsuz isteklere boş/hata sayfası
+    döndürüyor, bu yüzden ayrı bir requests.get() işe yaramıyor."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         log("UYARI: playwright kurulu değil, tarayıcı tabanlı indirme atlanıyor.")
         return None
 
-    video_url = None
+    video_bytes = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
+            found = {}
 
             def handle_response(response):
-                nonlocal video_url
-                if video_url:
+                if found.get("url"):
                     return
                 ctype = response.headers.get("content-type", "")
                 if ".mp4" in response.url or "video/mp4" in ctype:
-                    video_url = response.url
+                    found["url"] = response.url
 
             page.on("response", handle_response)
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
                 page.wait_for_timeout(4000)
+                video_url = found.get("url")
                 if not video_url:
-                    video_url = page.eval_on_selector("video", "el => el.currentSrc || el.src")
-            except Exception:
-                pass
+                    try:
+                        video_url = page.eval_on_selector("video", "el => el.currentSrc || el.src")
+                    except Exception:
+                        video_url = None
+                if video_url:
+                    resp = page.context.request.get(video_url)
+                    if resp.ok:
+                        body = resp.body()
+                        if len(body) >= 100_000:
+                            video_bytes = body
+            except Exception as exc:
+                log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
             browser.close()
     except Exception as exc:
-        log(f"UYARI: tarayıcı tabanlı indirme hata verdi: {exc}")
+        log(f"UYARI: tarayıcı başlatma hatası: {exc}")
         return None
-    return video_url or None
+    return video_bytes
 
 
-def fetch_download_url(candidate: dict) -> Optional[str]:
-    """Kaynak videonun indirilebilir linkini döndürür. Önce Graph API'nin
-    verdiği media_url'e, sonra sayfanın ham HTML'ine, en son (en yavaş ama
-    en güvenilir) headless tarayıcıya bakar. Bazı çok yüksek performanslı
+def fetch_video_bytes(candidate: dict) -> Optional[bytes]:
+    """Kaynak videonun dosya içeriğini (bytes) döndürür. Önce Graph API'nin
+    verdiği media_url'i, sonra sayfanın ham HTML'ini, en son (en yavaş ama
+    en güvenilir) headless tarayıcıyı dener. Bazı çok yüksek performanslı
     videolar için Graph API media_url hiç vermiyor, bu yüzden bu zincir var."""
     if candidate.get("media_url"):
-        return candidate["media_url"]
+        b = _download_bytes(candidate["media_url"])
+        if b:
+            return b
 
     permalink = candidate.get("permalink")
     if not permalink:
@@ -280,13 +305,15 @@ def fetch_download_url(candidate: dict) -> Optional[str]:
 
     url = _fetch_download_url_from_html(permalink)
     if url:
-        return url
+        b = _download_bytes(url)
+        if b:
+            return b
 
-    url = _fetch_download_url_via_browser(permalink)
-    if url:
-        return url
+    b = _fetch_video_bytes_via_browser(permalink)
+    if b:
+        return b
 
-    log(f"UYARI: {candidate['id']} için hiçbir yöntemle video linki bulunamadı.")
+    log(f"UYARI: {candidate['id']} için hiçbir yöntemle video indirilemedi.")
     return None
 
 
@@ -490,21 +517,22 @@ def main() -> None:
             log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
         return
 
-    # Sıradaki en uygun videodan başlayıp, indirilebilir bir link bulana kadar
-    # dener (media_url yoksa yedek yöntem çalışır, o da başarısız olursa
-    # sıradaki video denenir — tek bir video yüzünden çalıştırma boşa gitmez).
+    # Sıradaki en uygun videodan başlayıp, indirilebilen bir video bulana
+    # kadar dener (media_url yoksa yedek yöntemler çalışır, onlar da
+    # başarısız olursa sıradaki video denenir — tek bir video yüzünden
+    # çalıştırma boşa gitmez).
     candidate = None
-    video_url = None
+    video_bytes = None
     for v in ordered:
-        url = fetch_download_url(v)
-        if url:
+        data = fetch_video_bytes(v)
+        if data:
             candidate = v
-            video_url = url
+            video_bytes = data
             break
         log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
 
     if not candidate:
-        log("Uygun videolardan hiçbiri indirilemedi (hepsi için link bulunamadı).")
+        log("Uygun videolardan hiçbiri indirilemedi.")
         return
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
@@ -515,18 +543,7 @@ def main() -> None:
         src = Path(tmp) / "source.mp4"
         dst = Path(tmp) / "processed.mp4"
 
-        download_headers = {**_BROWSER_HEADERS, "Referer": "https://www.instagram.com/"}
-        r = requests.get(video_url, headers=download_headers, stream=True)
-        raise_for_status_verbose(r)
-        with open(src, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-
-        if src.stat().st_size < 100_000:
-            raise RuntimeError(
-                f"İndirilen dosya çok küçük ({src.stat().st_size} bayt) — muhtemelen video "
-                "değil, hata sayfası indirilmiş (Referer/CDN erişim sorunu)."
-            )
+        src.write_bytes(video_bytes)
 
         process_video(src, dst)
         public_url = upload_video(dst, remote_name)
