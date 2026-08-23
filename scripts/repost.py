@@ -205,27 +205,16 @@ _BROWSER_HEADERS = {
 }
 
 
-def fetch_download_url(candidate: dict) -> Optional[str]:
-    """Kaynak videonun indirilebilir linkini döndürür. Önce Graph API'nin
-    verdiği media_url'e bakar; yoksa videonun herkese açık sayfasından
-    (permalink) gerçek dosya linkini bulmaya çalışır (bazı çok yüksek
-    performanslı videolar için Graph API media_url hiç vermiyor)."""
-    if candidate.get("media_url"):
-        return candidate["media_url"]
-
-    permalink = candidate.get("permalink")
-    if not permalink:
-        return None
-
+def _fetch_download_url_from_html(permalink: str) -> Optional[str]:
+    """Hızlı yol: sayfanın ham HTML'inde video linki gömülü mü diye bakar.
+    Instagram'ın çoğu sayfası artık JS ile dolduğu için genelde boş döner,
+    ama ücretsiz ve hızlı olduğu için önce bu denenir."""
     try:
         r = requests.get(permalink, headers=_BROWSER_HEADERS, timeout=20)
-    except requests.RequestException as exc:
-        log(f"UYARI: {candidate['id']} sayfası alınamadı: {exc}")
+    except requests.RequestException:
         return None
     if not r.ok:
-        log(f"UYARI: {candidate['id']} sayfası HTTP {r.status_code} döndü.")
         return None
-
     html = r.text
     match = re.search(r'<meta property="og:video(?::secure_url)?" content="([^"]+)"', html)
     if match:
@@ -236,7 +225,68 @@ def fetch_download_url(candidate: dict) -> Optional[str]:
             return match.group(1).encode().decode("unicode_escape")
         except UnicodeDecodeError:
             return match.group(1)
-    log(f"UYARI: {candidate['id']} sayfasında video linki bulunamadı (yedek yöntem de başarısız).")
+    return None
+
+
+def _fetch_download_url_via_browser(permalink: str) -> Optional[str]:
+    """Yavaş ama daha güvenilir yol: gerçek bir (headless) tarayıcı ile
+    sayfayı işletir, videonun gerçek dosya isteğini ağ trafiğinden yakalar."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log("UYARI: playwright kurulu değil, tarayıcı tabanlı indirme atlanıyor.")
+        return None
+
+    video_url = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
+
+            def handle_response(response):
+                nonlocal video_url
+                if video_url:
+                    return
+                ctype = response.headers.get("content-type", "")
+                if ".mp4" in response.url or "video/mp4" in ctype:
+                    video_url = response.url
+
+            page.on("response", handle_response)
+            try:
+                page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(4000)
+                if not video_url:
+                    video_url = page.eval_on_selector("video", "el => el.currentSrc || el.src")
+            except Exception:
+                pass
+            browser.close()
+    except Exception as exc:
+        log(f"UYARI: tarayıcı tabanlı indirme hata verdi: {exc}")
+        return None
+    return video_url or None
+
+
+def fetch_download_url(candidate: dict) -> Optional[str]:
+    """Kaynak videonun indirilebilir linkini döndürür. Önce Graph API'nin
+    verdiği media_url'e, sonra sayfanın ham HTML'ine, en son (en yavaş ama
+    en güvenilir) headless tarayıcıya bakar. Bazı çok yüksek performanslı
+    videolar için Graph API media_url hiç vermiyor, bu yüzden bu zincir var."""
+    if candidate.get("media_url"):
+        return candidate["media_url"]
+
+    permalink = candidate.get("permalink")
+    if not permalink:
+        return None
+
+    url = _fetch_download_url_from_html(permalink)
+    if url:
+        return url
+
+    url = _fetch_download_url_via_browser(permalink)
+    if url:
+        return url
+
+    log(f"UYARI: {candidate['id']} için hiçbir yöntemle video linki bulunamadı.")
     return None
 
 

@@ -45,6 +45,9 @@ jobs:
       - name: Bağımlılıkları yükle
         run: pip install -r requirements.txt
 
+      - name: Headless tarayıcı kur (media_url eksik videolar için yedek indirme)
+        run: playwright install --with-deps chromium
+
       - name: Repost script'ini çalıştır
         env:
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
