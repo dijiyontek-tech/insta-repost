@@ -165,6 +165,13 @@ def fetch_own_videos(limit: int = 50) -> list:
     if no_url:
         for it in no_url[:3]:
             log(f"  ham veri: {json.dumps(it, ensure_ascii=False)}")
+        # Tekil sorgulama farklı sonuç veriyor mu diye test ediyoruz.
+        test_id = no_url[0]["id"]
+        r2 = requests.get(
+            f"{GRAPH_BASE}/{test_id}",
+            params={"fields": "media_url,media_type,media_product_type", "access_token": IG_ACCESS_TOKEN},
+        )
+        log(f"  tekil sorgu {test_id} -> HTTP {r2.status_code}: {r2.text[:500]}")
     return videos
 
 
