@@ -28,6 +28,10 @@ on:
         description: "Teşhis: belirli bir medya ID'sini ham veri + izlenme sayısıyla logla"
         type: string
         default: ""
+      test_lock:
+        description: "Teşhis: video seçmeden sadece kilit mekanizmasını test et"
+        type: boolean
+        default: false
 
 jobs:
   repost:
@@ -62,6 +66,7 @@ jobs:
           MIN_VIEW_COUNT: "10000"
           RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
           TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
+          TEST_LOCK: ${{ inputs.test_lock || 'false' }}
           # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
           # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
           # bastırılıyor, deneme modu bunu aşmanın yolu).

@@ -820,6 +820,17 @@ def _run() -> None:
 
 
 if __name__ == "__main__":
+    if os.environ.get("TEST_LOCK", "false").strip().lower() in ("1", "true", "yes"):
+        release_lock()
+        first = acquire_lock(timeout_s=5)
+        log(f"TEST_LOCK: birinci acquire_lock() -> {first}")
+        second = acquire_lock(timeout_s=5)
+        log(f"TEST_LOCK: kilit TUTULUYORKEN ikinci acquire_lock() -> {second} (beklenen: False)")
+        release_lock()
+        third = acquire_lock(timeout_s=5)
+        log(f"TEST_LOCK: serbest bırakıldıktan sonra üçüncü acquire_lock() -> {third} (beklenen: True)")
+        release_lock()
+        sys.exit(0)
     try:
         main()
     except Exception as exc:  # noqa: BLE001 - GitHub Actions'ta hatayı görünür kılmak için
