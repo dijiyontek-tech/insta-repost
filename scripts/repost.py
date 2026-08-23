@@ -272,14 +272,21 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
                 if not video_url:
                     try:
                         video_url = page.eval_on_selector("video", "el => el.currentSrc || el.src")
-                    except Exception:
+                    except Exception as exc:
+                        log(f"  tarayıcı teşhis: video DOM elemanı bulunamadı ({exc})")
                         video_url = None
                 if video_url:
+                    log(f"  tarayıcı teşhis: video linki bulundu -> {video_url[:150]}")
                     resp = page.context.request.get(video_url)
+                    log(f"  tarayıcı teşhis: indirme yanıtı HTTP {resp.status}, boyut {len(resp.body())} bayt")
                     if resp.ok:
                         body = resp.body()
                         if len(body) >= 100_000:
                             video_bytes = body
+                        else:
+                            log(f"  tarayıcı teşhis: içerik başı: {body[:200]!r}")
+                else:
+                    log("  tarayıcı teşhis: ne ağ trafiğinde ne DOM'da video linki bulunamadı.")
             except Exception as exc:
                 log(f"UYARI: tarayıcı ile video indirme hatası: {exc}")
             browser.close()
