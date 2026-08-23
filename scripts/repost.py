@@ -250,17 +250,49 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
         log("UYARI: playwright kurulu değil, tarayıcı tabanlı indirme atlanıyor.")
         return None
 
-    # Instagram videoyu parçalı (fragmented/DASH) mp4 segmentleri olarak
-    # sunuyor: ağ trafiğinde yakalanan tek bir segment isteği (moof/mdat)
-    # başlangıç (init/moov) segmentini içermediği için ffmpeg'de "could not
-    # find corresponding trex" hatasıyla açılamıyor. Bunun yerine tarayıcının
-    # <video> elemanının kendisinden (currentSrc — bu blob: veya gerçek bir
-    # CDN URL'i olabilir) sayfa İÇİNDEN fetch() ile indiriyoruz: bu, MSE'nin
-    # zaten birleştirip oynattığı TAM ve geçerli akışı verir.
+    # Instagram videoyu blob: URL üzerinden oynatıyor. Sayfa içinden bu
+    # blob: URL'i fetch() ile çekmeye çalışmak Instagram'ın CSP'si tarafından
+    # engelleniyor ("TypeError: Failed to fetch"). Ham ağ segmentlerini
+    # birleştirmeye çalışmak da işe yaramıyor çünkü tek bir segment isteği
+    # (moof/mdat) başlangıç (init/moov) atomunu içermiyor ("could not find
+    # corresponding trex"). Çözüm: `URL.createObjectURL` ve
+    # `SourceBuffer.appendBuffer`'ı sayfa yüklenmeden ÖNCE yamalayıp asıl
+    # Blob/MediaSource nesnesini veya MSE'ye eklenen ham parçaları
+    # yakalıyoruz — bunlar ağ isteği değil, bellek-içi işlemler olduğu için
+    # CSP'den etkilenmiyor.
+    js_init = """
+    (() => {
+        if (window.__igPatched) return;
+        window.__igPatched = true;
+        window.__igBlobMap = new Map();
+        window.__igChunks = [];
+        const origCreate = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = function(obj) {
+            const url = origCreate(obj);
+            window.__igBlobMap.set(url, obj);
+            return url;
+        };
+        if (window.SourceBuffer) {
+            const origAppend = SourceBuffer.prototype.appendBuffer;
+            SourceBuffer.prototype.appendBuffer = function(data) {
+                try {
+                    let ab = null;
+                    if (data instanceof ArrayBuffer) ab = data.slice(0);
+                    else if (ArrayBuffer.isView(data)) {
+                        ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+                    }
+                    if (ab) window.__igChunks.push(ab);
+                } catch (e) {}
+                return origAppend.apply(this, arguments);
+            };
+        }
+    })();
+    """
+
     js_extract = """
     async () => {
         const video = document.querySelector('video');
-        if (!video) return null;
+        if (!video) return {error: 'no-video-element'};
         await new Promise(resolve => {
             if (video.readyState >= 2) return resolve();
             video.addEventListener('loadeddata', resolve, {once: true});
@@ -277,21 +309,39 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
             }
         }
         await new Promise(r => setTimeout(r, 1500));
-        const src = video.currentSrc || video.src;
-        if (!src) return null;
-        try {
-            const resp = await fetch(src);
-            const buf = await resp.arrayBuffer();
-            const bytes = new Uint8Array(buf);
+
+        const toB64 = (bytes) => {
             let binary = '';
             const chunkSize = 0x8000;
             for (let i = 0; i < bytes.length; i += chunkSize) {
                 binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
             }
-            return {src, b64: btoa(binary)};
-        } catch (e) {
-            return {src, error: String(e)};
+            return btoa(binary);
+        };
+
+        const src = video.currentSrc || video.src;
+        const obj = src ? window.__igBlobMap.get(src) : null;
+        if (obj && typeof obj.arrayBuffer === 'function') {
+            try {
+                const buf = await obj.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                return {src, method: 'blob', size: bytes.length, b64: toB64(bytes)};
+            } catch (e) {
+                return {src, error: 'blob-read-failed: ' + String(e)};
+            }
         }
+
+        const chunks = window.__igChunks || [];
+        if (chunks.length) {
+            let total = 0;
+            for (const c of chunks) total += c.byteLength;
+            const merged = new Uint8Array(total);
+            let offset = 0;
+            for (const c of chunks) { merged.set(new Uint8Array(c), offset); offset += c.byteLength; }
+            return {src, method: 'sourcebuffer', size: merged.length, b64: toB64(merged)};
+        }
+
+        return {src, error: 'no-blob-and-no-sourcebuffer-chunks'};
     }
     """
 
@@ -300,19 +350,22 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
+            page.add_init_script(js_init)
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
                 result = page.evaluate(js_extract)
                 if not result:
-                    log("  tarayıcı teşhis: sayfada <video> elemanı bulunamadı.")
+                    log("  tarayıcı teşhis: beklenmeyen boş sonuç.")
                 elif result.get("error"):
-                    log(f"  tarayıcı teşhis: sayfa-içi fetch hatası ({result['src'][:80]}): {result['error']}")
+                    log(f"  tarayıcı teşhis: {result.get('src', '?')[:80]} -> {result['error']}")
                 elif result.get("b64"):
                     import base64
 
                     body = base64.b64decode(result["b64"])
-                    log(f"  tarayıcı teşhis: sayfa-içi indirme -> {result['src'][:100]}, boyut {len(body)} bayt")
+                    log(
+                        f"  tarayıcı teşhis: [{result['method']}] {result['src'][:100]}, boyut {len(body)} bayt"
+                    )
                     if len(body) >= 100_000:
                         video_bytes = body
                     else:
