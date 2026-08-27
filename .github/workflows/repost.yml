@@ -5,7 +5,16 @@ on:
     # 05:00-18:00 UTC ≈ 08:00-21:00 Türkiye saati, 30 dakikada bir ≈ günde 27
     # çalıştırma. Instagram'ın ~25/gün paylaşım limitine yakın; son 1-2
     # çalıştırma bazı günler limit dolduğu için başarısız olabilir, bu normal.
-    - cron: "*/30 5-18 * * *"
+    #
+    # ÖNEMLİ: dakikayı bilerek :00/:30 (tam saat/yarım saat) YAPMIYORUZ.
+    # GitHub'ın kendi dokümantasyonu: "The schedule event can be delayed
+    # during periods of high loads... high load times include the start
+    # of every hour. If the load is high enough, some queued jobs may be
+    # dropped." :00 ve :30 tam olarak dünyadaki en yoğun dakikalar —
+    # 27 Ağustos'ta hiçbir zamanlanmış çalıştırma tetiklenmemesinin
+    # sebebi muhtemelen buydu. :06/:36 gibi rastgele bir dakika kullanmak
+    # bu yoğunluğu büyük ölçüde atlatıyor.
+    - cron: "6,36 5-18 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
