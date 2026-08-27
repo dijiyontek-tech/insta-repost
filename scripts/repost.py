@@ -680,30 +680,62 @@ def _run() -> None:
         log("Tur takibi sıfırlandı, bir sonraki çalıştırma en yüksek izlenmeliden başlayacak.")
         return
 
-    today = date.today().isoformat()
-    daily = state.get("_daily", {})
-    if daily.get("date") != today:
-        daily = {"date": today, "count": 0}
-    if not DRY_RUN and daily["count"] >= DAILY_PUBLISH_LIMIT:
-        log(f"Bugün için günlük paylaşım limiti ({DAILY_PUBLISH_LIMIT}) zaten doldu, atlanıyor.")
+    # Tek çalıştırmada birden fazla video paylaşmak için (ör. günde 5 kez
+    # tetiklenip her seferinde 5 video) — böylece paylaşımlar günün belirli
+    # saatlerinde toplu (batch) halinde gelir, sürekli her 30 dakikada bir
+    # tek tek gelip birbirinin izlenmesini engellemez.
+    posts_per_run = max(1, int(os.environ.get("POSTS_PER_RUN", "1")))
+
+    videos_all = fetch_own_videos()
+    if not videos_all:
+        log("Hesapta video bulunamadı.")
         return
 
-    videos = fetch_own_videos()
+    posted_ids = set(state.get("_posted_ids", []))
+    daily = state.get("_daily", {})
+    today = date.today().isoformat()
+    if daily.get("date") != today:
+        daily = {"date": today, "count": 0}
 
+    posted_this_run = 0
+    for i in range(posts_per_run):
+        if not DRY_RUN and daily["count"] >= DAILY_PUBLISH_LIMIT:
+            log(f"Bugün için günlük paylaşım limiti ({DAILY_PUBLISH_LIMIT}) zaten doldu, atlanıyor.")
+            break
+        if posts_per_run > 1:
+            log(f"--- Bu çalıştırmada {i + 1}/{posts_per_run}. video ---")
+        ok = _post_one(state, videos_all, posted_ids, daily)
+        if not ok:
+            break
+        posted_this_run += 1
+        if DRY_RUN:
+            # Deneme modu sadece önizleme amaçlı, tek video yeterli —
+            # state'e hiçbir şey yazılmadığı için döngü tekrar aynı videoyu
+            # seçerdi.
+            break
+
+    if posts_per_run > 1:
+        log(f"Bu çalıştırmada toplam {posted_this_run} video paylaşıldı.")
+
+
+def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bool:
+    """Tek bir video seçer, indirir, işler ve (deneme modu değilse) paylaşır.
+    Başarılı olursa state'i günceller ve True, uygun/indirilebilir video
+    kalmadıysa False döner."""
     # Kendi attığımız (remix'lenmiş) videoları asla yeniden kaynak olarak
     # seçme — hem daha önce paylaştığımız medya ID'lerini hem de sabit
     # caption'ımızla eşleşen videoları eliyoruz (ikisi de kendi paylaşımımız
-    # olduğunu gösterir).
-    posted_ids = set(state.get("_posted_ids", []))
+    # olduğunu gösterir). posted_ids bu çalıştırma içinde de güncellendiği
+    # için aynı videoyu bir batch içinde iki kez seçmiyoruz.
     videos = [
-        v for v in videos
+        v for v in videos_all
         if v["id"] not in posted_ids
         and not (CAPTION_SUFFIX and (v.get("caption") or "").strip() == CAPTION_SUFFIX.strip())
     ]
 
     if not videos:
-        log("Hesapta video bulunamadı.")
-        return
+        log("Paylaşılacak uygun video kalmadı.")
+        return False
 
     cycle = state.get("_cycle", 0)
 
@@ -750,7 +782,7 @@ def _run() -> None:
             log(f"{MIN_VIEW_COUNT} üzeri izlenmeye sahip video bulunamadı.")
         else:
             log("Tüm videolar limit sayısı kadar remix'lenmiş. MAX_REPOSTS_PER_VIDEO'yu artırmayı düşünebilirsin.")
-        return
+        return False
 
     # Sıradaki en uygun videodan başlayıp, indirilip İŞLENEBİLEN bir video
     # bulana kadar dener (media_url yoksa yedek yöntemler çalışır, indirilen
@@ -786,7 +818,7 @@ def _run() -> None:
 
     if not candidate:
         log("Uygun videolardan hiçbiri indirilip işlenemedi.")
-        return
+        return False
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
 
@@ -807,14 +839,22 @@ def _run() -> None:
                     "\"Run workflow\" ile bu sefer **Deneme modu**'nu kapatıp gerçek "
                     "paylaşımı tetikleyebilirsin.\n"
                 )
-        return
+        return True
 
     try:
-        creation_id = create_media_container(public_url, caption, trial=TRIAL_REEL)
-        log(f"Container oluşturuldu: {creation_id}")
-        wait_until_ready(creation_id)
-        media_id = publish_media(creation_id)
-        log(f"Yayınlandı! Yeni medya ID: {media_id}")
+        try:
+            creation_id = create_media_container(public_url, caption, trial=TRIAL_REEL)
+            log(f"Container oluşturuldu: {creation_id}")
+            wait_until_ready(creation_id)
+            media_id = publish_media(creation_id)
+            log(f"Yayınlandı! Yeni medya ID: {media_id}")
+        except (requests.HTTPError, RuntimeError, TimeoutError) as exc:
+            # Instagram'ın kendi günlük gerçek paylaşım limiti (25'ten önce
+            # de gelebiliyor, ör. "Application request limit reached")
+            # doldurduğunda çalıştırmayı hatayla çökertmek yerine bu
+            # batch'i temiz şekilde burada durduruyoruz.
+            log(f"UYARI: Instagram paylaşımı reddetti ({exc}), bu batch sonlandırılıyor.")
+            return False
     finally:
         delete_video(remote_name)
         log("Geçici video Supabase'ten silindi.")
@@ -830,6 +870,7 @@ def _run() -> None:
     posted_ids.add(media_id)
     state["_posted_ids"] = list(posted_ids)
     save_state(state)
+    return True
 
 
 if __name__ == "__main__":

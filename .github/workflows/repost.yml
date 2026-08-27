@@ -2,19 +2,23 @@ name: Instagram Reels Remix & Repost
 
 on:
   schedule:
-    # 05:00-18:00 UTC ≈ 08:00-21:00 Türkiye saati, 30 dakikada bir ≈ günde 27
-    # çalıştırma. Instagram'ın ~25/gün paylaşım limitine yakın; son 1-2
-    # çalıştırma bazı günler limit dolduğu için başarısız olabilir, bu normal.
+    # Sürekli her 30 dakikada bir tek tek paylaşım yerine, günde 5 sabit
+    # saatte 5'er video (toplu/batch) paylaşılıyor — çok sık aralıklarla
+    # gelen paylaşımlar birbirinin izlenmesini engelliyordu. Saatler:
+    # 09:00, 12:00, 15:00, 18:00, 21:00 Türkiye saati (UTC+3).
     #
-    # ÖNEMLİ: dakikayı bilerek :00/:30 (tam saat/yarım saat) YAPMIYORUZ.
-    # GitHub'ın kendi dokümantasyonu: "The schedule event can be delayed
-    # during periods of high loads... high load times include the start
-    # of every hour. If the load is high enough, some queued jobs may be
-    # dropped." :00 ve :30 tam olarak dünyadaki en yoğun dakikalar —
-    # 27 Ağustos'ta hiçbir zamanlanmış çalıştırma tetiklenmemesinin
-    # sebebi muhtemelen buydu. :06/:36 gibi rastgele bir dakika kullanmak
-    # bu yoğunluğu büyük ölçüde atlatıyor.
-    - cron: "6,36 5-18 * * *"
+    # ÖNEMLİ: dakikaları bilerek :00 YAPMIYORUZ, hepsini de FARKLI
+    # dakikalara yayıyoruz. GitHub'ın kendi dokümantasyonu: "The schedule
+    # event can be delayed during periods of high loads... high load
+    # times include the start of every hour. If the load is high enough,
+    # some queued jobs may be dropped." :00/:30 dünyadaki en yoğun
+    # dakikalar — 27 Ağustos'ta hiçbir zamanlanmış çalıştırma
+    # tetiklenmemesinin sebebi muhtemelen buydu.
+    - cron: "4 6 * * *"    # 09:04 TSİ
+    - cron: "11 9 * * *"   # 12:11 TSİ
+    - cron: "7 12 * * *"   # 15:07 TSİ
+    - cron: "14 15 * * *"  # 18:14 TSİ
+    - cron: "9 18 * * *"   # 21:09 TSİ
   workflow_dispatch:
     inputs:
       dry_run:
@@ -37,6 +41,10 @@ on:
         description: "Teşhis: belirli bir medya ID'sini ham veri + izlenme sayısıyla logla"
         type: string
         default: ""
+      posts_per_run:
+        description: "Bu çalıştırmada kaç video paylaşılsın"
+        type: string
+        default: "1"
 
 jobs:
   repost:
@@ -66,11 +74,21 @@ jobs:
           SUPABASE_BUCKET: insta-repost
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
+          # 5 saat x 5 video = günde 25. Instagram'ın gerçek günlük paylaşım
+          # limitine daha önce ~19-20'de çarpmıştık; 25 bunun biraz üzerinde,
+          # bu yüzden bazı günler son 1-2 paylaşım "Application request
+          # limit reached" hatasıyla başarısız olabilir — script bunu
+          # hatasız atlar, sonraki batch'te devam eder.
+          DAILY_PUBLISH_LIMIT: "25"
           DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
           MIN_VIEW_COUNT: "0"
           RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
           TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
+          # Zamanlanmış (cron) çalıştırmalarda her tetiklemede 5 video
+          # paylaşılır (günde 5 saat x 5 = 25); elle tetiklemede varsayılan
+          # 1'dir, istenirse "posts_per_run" girdisiyle değiştirilebilir.
+          POSTS_PER_RUN: ${{ github.event_name != 'workflow_dispatch' && '5' || inputs.posts_per_run }}
           # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
           # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
           # bastırılıyor, deneme modu bunu aşmanın yolu).
