@@ -21,6 +21,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -644,7 +645,36 @@ def get_view_counts(state: dict, videos: list) -> dict:
 
 # ---------- Ana akış ----------
 
+# GitHub Actions'ın kendi dokümantasyonu, yoğunluk zamanlarında zamanlanmış
+# (schedule) tetiklemelerin SAATLERCE gecikebildiğini (hatta düşürülebildiğini)
+# belirtiyor — gerçekten de gece 01:00-05:00 TSİ gibi saatlerde tetiklenen
+# çalıştırmalar gözlemlendi. Cron dakikasını kaydırmak yeterli olmadığı için,
+# script'in kendisine bir güvenlik ağı ekliyoruz: GitHub HANGİ SAATTE
+# tetiklerse tetiklesin, zamanlanmış bir çalıştırma bu pencerenin dışındaysa
+# paylaşım yapmayı reddediyor. Elle tetiklemeler (workflow_dispatch, test
+# amaçlı) bu kısıtlamaya tabi değil.
+POSTING_WINDOW_START = (8, 30)   # TSİ (Europe/Istanbul)
+POSTING_WINDOW_END = (21, 45)    # TSİ
+
+
+def _within_posting_window() -> bool:
+    now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    start = now.replace(hour=POSTING_WINDOW_START[0], minute=POSTING_WINDOW_START[1], second=0, microsecond=0)
+    end = now.replace(hour=POSTING_WINDOW_END[0], minute=POSTING_WINDOW_END[1], second=0, microsecond=0)
+    return start <= now <= end
+
+
 def main() -> None:
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and not _within_posting_window():
+        now_tr = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%H:%M")
+        log(
+            f"UYARI: zamanlanmış tetikleme beklenen saat aralığının "
+            f"({POSTING_WINDOW_START[0]:02d}:{POSTING_WINDOW_START[1]:02d}-"
+            f"{POSTING_WINDOW_END[0]:02d}:{POSTING_WINDOW_END[1]:02d} TSİ) dışında geldi "
+            f"(şu an {now_tr} TSİ, muhtemelen GitHub'ın gecikmesi) — bu çalıştırma atlanıyor."
+        )
+        return
+
     # Zamanlanmış (cron) ve elle tetiklenen çalıştırmalar aynı ana denk
     # gelirse, ikisi de aynı "henüz kullanılmamış" videoyu seçip iki kez
     # paylaşabiliyordu (state okuma/yazma arasında yarış durumu). Bunu
@@ -697,6 +727,14 @@ def _run() -> None:
     if daily.get("date") != today:
         daily = {"date": today, "count": 0}
 
+    # Tur (cycle) matematiğinde bir uç durum vardı: bir batch içinde o anki
+    # turda kalan son video paylaşılınca, hemen ardından tur ilerleyip AYNI
+    # videoyu (yeni turda "henüz kullanılmadı" sayılarak) bu kez tekrar
+    # seçebiliyordu — yani aynı video aynı çalıştırmada arka arkaya iki kez
+    # paylaşılabiliyordu. Bu setle, bu çalıştırmada zaten paylaşılmış bir
+    # orijinali kesin olarak bir daha seçmiyoruz (tur mantığından bağımsız).
+    already_posted_originals = set()
+
     posted_this_run = 0
     for i in range(posts_per_run):
         if not DRY_RUN and daily["count"] >= DAILY_PUBLISH_LIMIT:
@@ -704,7 +742,7 @@ def _run() -> None:
             break
         if posts_per_run > 1:
             log(f"--- Bu çalıştırmada {i + 1}/{posts_per_run}. video ---")
-        ok = _post_one(state, videos_all, posted_ids, daily)
+        ok = _post_one(state, videos_all, posted_ids, daily, already_posted_originals)
         if not ok:
             break
         posted_this_run += 1
@@ -718,18 +756,19 @@ def _run() -> None:
         log(f"Bu çalıştırmada toplam {posted_this_run} video paylaşıldı.")
 
 
-def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bool:
+def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, already_posted_originals: set) -> bool:
     """Tek bir video seçer, indirir, işler ve (deneme modu değilse) paylaşır.
     Başarılı olursa state'i günceller ve True, uygun/indirilebilir video
     kalmadıysa False döner."""
     # Kendi attığımız (remix'lenmiş) videoları asla yeniden kaynak olarak
     # seçme — hem daha önce paylaştığımız medya ID'lerini hem de sabit
     # caption'ımızla eşleşen videoları eliyoruz (ikisi de kendi paylaşımımız
-    # olduğunu gösterir). posted_ids bu çalıştırma içinde de güncellendiği
-    # için aynı videoyu bir batch içinde iki kez seçmiyoruz.
+    # olduğunu gösterir). already_posted_originals, bu ÇALIŞTIRMADA zaten
+    # paylaşılmış orijinalleri (tur matematiğinden bağımsız olarak) eler.
     videos = [
         v for v in videos_all
         if v["id"] not in posted_ids
+        and v["id"] not in already_posted_originals
         and not (CAPTION_SUFFIX and (v.get("caption") or "").strip() == CAPTION_SUFFIX.strip())
     ]
 
@@ -791,10 +830,23 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bo
     candidate = None
     public_url = None
     remote_name = None
+    def _mark_attempted(v):
+        # Bir video hiçbir yöntemle indirilemiyorsa (ör. kalıcı olarak
+        # erişilemez/silinmiş), state'te hiçbir zaman "kullanıldı"
+        # işaretlenmediği için tur (cycle) ilerledikçe TEK kalan aday haline
+        # gelip her batch'i tek başına tıkıyordu ("zehirli video"). Başarısız
+        # denemeleri de bu turda "denendi" olarak işaretleyip turun ilerlemesini
+        # sağlıyoruz — video bir sonraki turda tekrar denenebilir.
+        if MEDIA_SELECTION == "top_viewed_cycle":
+            entry = state.get(v["id"], {"repost_count": 0})
+            entry["last_cycle_used"] = cycle
+            state[v["id"]] = entry
+
     for v in ordered:
         data = fetch_video_bytes(v)
         if not data:
             log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
+            _mark_attempted(v)
             continue
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -805,12 +857,14 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bo
                 process_video(src, dst)
             except subprocess.CalledProcessError as exc:
                 log(f"UYARI: {v['id']} işlenemedi (ffmpeg hatası: {exc}), sıradaki video deneniyor.")
+                _mark_attempted(v)
                 continue
             remote_name = f"{v['id']}-{int(time.time())}.mp4"
             try:
                 public_url = upload_video(dst, remote_name)
             except requests.HTTPError as exc:
                 log(f"UYARI: {v['id']} Supabase'e yüklenemedi ({exc}), sıradaki video deneniyor.")
+                _mark_attempted(v)
                 continue
             log(f"Video Supabase'e yüklendi: {public_url}")
         candidate = v
@@ -818,6 +872,10 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bo
 
     if not candidate:
         log("Uygun videolardan hiçbiri indirilip işlenemedi.")
+        # Başarısız denemelerin "bu turda denendi" işaretini kalıcı hale
+        # getiriyoruz — yoksa bir sonraki çalıştırmada aynı indirilemeyen
+        # video yine tek aday olarak kalıp turu tıkamaya devam eder.
+        save_state(state)
         return False
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
@@ -869,6 +927,7 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict) -> bo
     state["_daily"] = daily
     posted_ids.add(media_id)
     state["_posted_ids"] = list(posted_ids)
+    already_posted_originals.add(candidate["id"])
     save_state(state)
     return True
 
