@@ -837,7 +837,9 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
         # gelip her batch'i tek başına tıkıyordu ("zehirli video"). Başarısız
         # denemeleri de bu turda "denendi" olarak işaretleyip turun ilerlemesini
         # sağlıyoruz — video bir sonraki turda tekrar denenebilir.
-        if MEDIA_SELECTION == "top_viewed_cycle":
+        # DENEME MODUNDA state'e hiçbir şey yazılmaz (tekrar tekrar güvenle
+        # test edilebilsin diye) — bu işaretleme de o kurala uyuyor.
+        if MEDIA_SELECTION == "top_viewed_cycle" and not DRY_RUN:
             entry = state.get(v["id"], {"repost_count": 0})
             entry["last_cycle_used"] = cycle
             state[v["id"]] = entry
@@ -872,10 +874,11 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
 
     if not candidate:
         log("Uygun videolardan hiçbiri indirilip işlenemedi.")
-        # Başarısız denemelerin "bu turda denendi" işaretini kalıcı hale
-        # getiriyoruz — yoksa bir sonraki çalıştırmada aynı indirilemeyen
-        # video yine tek aday olarak kalıp turu tıkamaya devam eder.
-        save_state(state)
+        if not DRY_RUN:
+            # Başarısız denemelerin "bu turda denendi" işaretini kalıcı hale
+            # getiriyoruz — yoksa bir sonraki çalıştırmada aynı indirilemeyen
+            # video yine tek aday olarak kalıp turu tıkamaya devam eder.
+            save_state(state)
         return False
 
     log(f"Seçilen video: {candidate['id']} ({candidate.get('permalink')})")
