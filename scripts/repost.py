@@ -597,8 +597,8 @@ def process_video(src: Path, dst: Path) -> None:
             "-stream_loop", "-1", "-i", str(gif_path),
             "-filter_complex",
             f"[0:v]{filter_chain},setpts={1 / speed:.4f}*PTS[base];"
-            f"[1:v]scale=170:-1[ovl];"
-            f"[base][ovl]overlay=x=W*0.38:y=H*0.90-188:shortest=1[outv]",
+            f"[1:v]scale=85:-1[ovl];"
+            f"[base][ovl]overlay=x=W*0.38:y=H*0.90-94:shortest=1[outv]",
             "-map", "[outv]", "-map", "0:a",
             "-af", f"atempo={speed}",
             "-c:v", "libx264", "-preset", "medium", "-crf", "18",
