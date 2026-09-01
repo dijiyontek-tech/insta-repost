@@ -584,12 +584,33 @@ def process_video(src: Path, dst: Path) -> None:
     # değiştirir hem de videoya hafif dinamizm katar.
     speed = round(random.uniform(0.97, 1.04), 3)
 
-    cmd = [
-        "ffmpeg", "-y", "-i", str(src),
-        "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
-        "-af", f"atempo={speed}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-    ]
+    # Takip Et butonuna işaret eden zıplayan bildirim ikonu — buton videonun
+    # sol-alt bölgesinde (ekranın altdan ~%25-30'u) çıktığı için ikonu onun
+    # hemen üstüne, sol tarafa yerleştiriyoruz.
+    gif_path = Path(__file__).resolve().parent.parent / "assets" / "follow_notif.gif"
+    use_overlay = gif_path.exists()
+
+    if use_overlay:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src),
+            "-stream_loop", "-1", "-i", str(gif_path),
+            "-filter_complex",
+            f"[0:v]{filter_chain},setpts={1 / speed:.4f}*PTS[base];"
+            f"[1:v]scale=280:-1[ovl];"
+            f"[base][ovl]overlay=x=W*0.25:y=H*0.85-310:shortest=1[outv]",
+            "-map", "[outv]", "-map", "0:a",
+            "-af", f"atempo={speed}",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        ]
+    else:
+        log(f"UYARI: {gif_path} bulunamadı, Takip Et animasyonu olmadan işleniyor.")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src),
+            "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
+            "-af", f"atempo={speed}",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        ]
     # Artık kaynağı gerçek yüksek çözünürlükte (1080x1920'ye kadar) indirdiğimiz
     # için uzun videolarda sabit CRF çıktısı Supabase'in obje boyutu limitini
     # ("Payload too large") aşabiliyor. Videonun süresine göre bir üst bitrate
