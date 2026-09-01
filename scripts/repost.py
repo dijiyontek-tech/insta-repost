@@ -680,6 +680,14 @@ def _decide_auto_batch_size(daily: dict) -> int:
     if remaining_target <= 0:
         return 0
 
+    # "auto" modu workflow_dispatch (dış zamanlayıcının API çağrısı) olarak
+    # gelir, bu yüzden schedule-özel gece koruması (_within_posting_window
+    # çağrısı main()'de) buraya uğramaz. Dış zamanlayıcı hatalı/geç
+    # tetiklerse bile gece paylaşım olmasın diye burada da SERT bir kontrol
+    # var — pencere dışındaysa hiç hesap yapmadan direkt 0.
+    if not _within_posting_window():
+        return 0
+
     now = datetime.now(ZoneInfo("Europe/Istanbul"))
     window_start = now.replace(hour=POSTING_WINDOW_START[0], minute=POSTING_WINDOW_START[1], second=0, microsecond=0)
     window_end = now.replace(hour=POSTING_WINDOW_END[0], minute=POSTING_WINDOW_END[1], second=0, microsecond=0)
