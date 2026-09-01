@@ -664,6 +664,42 @@ def _within_posting_window() -> bool:
     return start <= now <= end
 
 
+DAILY_TARGET_RANGE = (18, 25)  # her gün rastgele seçilen günlük hedef aralığı
+
+
+def _decide_auto_batch_size(daily: dict) -> int:
+    """Dış zamanlayıcı sık aralıklarla (ör. 30-45 dakikada bir) "yoklama"
+    yapıyor; her yoklamada script kendi kendine karar veriyor. Bu sayede
+    paylaşım saatleri ve miktarları her gün farklı, öngörülemez oluyor —
+    sabit saatlerde sabit sayıda paylaşım Instagram'a bot gibi görünürken,
+    bu tempo bir insanın günlük paylaşım alışkanlığına daha çok benziyor."""
+    if "target" not in daily:
+        daily["target"] = random.randint(*DAILY_TARGET_RANGE)
+
+    remaining_target = daily["target"] - daily["count"]
+    if remaining_target <= 0:
+        return 0
+
+    now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    window_start = now.replace(hour=POSTING_WINDOW_START[0], minute=POSTING_WINDOW_START[1], second=0, microsecond=0)
+    window_end = now.replace(hour=POSTING_WINDOW_END[0], minute=POSTING_WINDOW_END[1], second=0, microsecond=0)
+    total = (window_end - window_start).total_seconds()
+    elapsed = max(0.0, min(total, (now - window_start).total_seconds()))
+    elapsed_fraction = elapsed / total if total > 0 else 1.0
+
+    expected_by_now = elapsed_fraction * daily["target"]
+    behind_schedule = daily["count"] < expected_by_now
+
+    # Hedefin gerisindeysek (ör. önceki yoklamalar atlanmışsa) yetişmek için
+    # daha kararlı davran; önündeysek/tam üstündeysek daha çok rastgelelik
+    # katarak insansı, düzensiz bir desen oluştur.
+    chance = 0.75 if behind_schedule else 0.25
+    if random.random() > chance:
+        return 0
+
+    return min(random.randint(1, 3), remaining_target)
+
+
 def main() -> None:
     if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and not _within_posting_window():
         now_tr = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%H:%M")
@@ -710,22 +746,34 @@ def _run() -> None:
         log("Tur takibi sıfırlandı, bir sonraki çalıştırma en yüksek izlenmeliden başlayacak.")
         return
 
-    # Tek çalıştırmada birden fazla video paylaşmak için (ör. günde 5 kez
-    # tetiklenip her seferinde 5 video) — böylece paylaşımlar günün belirli
-    # saatlerinde toplu (batch) halinde gelir, sürekli her 30 dakikada bir
-    # tek tek gelip birbirinin izlenmesini engellemez.
-    posts_per_run = max(1, int(os.environ.get("POSTS_PER_RUN", "1")))
-
-    videos_all = fetch_own_videos()
-    if not videos_all:
-        log("Hesapta video bulunamadı.")
-        return
-
     posted_ids = set(state.get("_posted_ids", []))
     daily = state.get("_daily", {})
     today = date.today().isoformat()
     if daily.get("date") != today:
         daily = {"date": today, "count": 0}
+
+    # POSTS_PER_RUN="auto" (dış zamanlayıcının kullandığı mod): script her
+    # "yoklama" çağrısında KENDİSİ karar veriyor — şimdi paylaşım yapsın mı,
+    # yapacaksa kaç video (1-3)? Sabit saatlerde sabit sayıda paylaşmak yerine
+    # bu, Instagram'a insan gibi görünen, günden güne değişen, öngörülemeyen
+    # bir paylaşım deseni oluşturuyor. Sabit bir sayı verilirse (ör. testte
+    # "3") o sayı olduğu gibi kullanılır.
+    posts_per_run_raw = os.environ.get("POSTS_PER_RUN", "1").strip().lower()
+    if posts_per_run_raw == "auto":
+        posts_per_run = _decide_auto_batch_size(daily)
+        if posts_per_run == 0:
+            log("Bu yoklamada paylaşım yapılmayacak (tempo/rastgelelik gereği atlandı).")
+            state["_daily"] = daily  # _decide_auto_batch_size günlük hedefi state'e yazmış olabilir
+            save_state(state)
+            return
+        log(f"Bu yoklamada {posts_per_run} video paylaşılacak (otomatik tempo).")
+    else:
+        posts_per_run = max(1, int(posts_per_run_raw))
+
+    videos_all = fetch_own_videos()
+    if not videos_all:
+        log("Hesapta video bulunamadı.")
+        return
 
     # Tur (cycle) matematiğinde bir uç durum vardı: bir batch içinde o anki
     # turda kalan son video paylaşılınca, hemen ardından tur ilerleyip AYNI
