@@ -708,7 +708,21 @@ def _decide_auto_batch_size(daily: dict) -> int:
     return min(random.randint(1, 3), remaining_target)
 
 
+JITTER_MAX_SECONDS = 600  # 10 dakika
+
+
 def main() -> None:
+    # Dış zamanlayıcı sabit bir kadansla (ör. her 30 dakikada bir) tetikliyor.
+    # Bu tetikleme Instagram'a hiç görünmüyor (yoklama atlanırsa Instagram'a
+    # hiçbir istek gitmiyor) — ama ek bir önlem olarak, gerçek paylaşım işini
+    # tetikleme anından da koparmak için burada rastgele bir bekleme
+    # uyguluyoruz. Böylece gerçek paylaşım anları tetikleyicinin sabit
+    # ızgarasına (ör. tam :00/:30) hiç denk gelmiyor.
+    if os.environ.get("POSTS_PER_RUN", "").strip().lower() == "auto":
+        jitter = random.uniform(0, JITTER_MAX_SECONDS)
+        log(f"Tetikleme kadansını bulanıklaştırmak için {jitter:.0f} saniye bekleniyor.")
+        time.sleep(jitter)
+
     if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and not _within_posting_window():
         now_tr = datetime.now(ZoneInfo("Europe/Istanbul")).strftime("%H:%M")
         log(
