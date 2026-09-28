@@ -9,7 +9,7 @@ on:
   # Bunun yerine, dış bir zamanlayıcı servisi (cron-job.org) günde birçok kez
   # (ör. her 30-45 dakikada bir) GitHub API'sinin workflow_dispatch uç
   # noktasını "posts_per_run": "auto" ile çağırıyor — script günün ilk
-  # çağrısında o gün kaç video (4-6) paylaşılacağını ve saatlerini rastgele
+  # çağrısında o gün kaç video (4-6) paylaşılacağını ve 09:00-21:00 arasındaki saatlerini rastgele
   # planlıyor, sonraki çağrılarda saati gelen slot için tek video paylaşıyor
   # (bkz. _decide_auto_batch_size). Saatler her gün farklı çıkıyor.
   workflow_dispatch:

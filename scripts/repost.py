@@ -940,7 +940,7 @@ def get_view_counts(state: dict, videos: list) -> dict:
 # paylaşım yapmayı reddediyor. Elle tetiklemeler (workflow_dispatch, test
 # amaçlı) bu kısıtlamaya tabi değil.
 POSTING_WINDOW_START = (8, 30)   # TSİ (Europe/Istanbul)
-POSTING_WINDOW_END = (23, 30)    # TSİ
+POSTING_WINDOW_END = (21, 0)     # TSİ
 
 
 def _within_posting_window() -> bool:
@@ -957,7 +957,7 @@ DAILY_TARGET_RANGE = (4, 6)
 # "ilk post hep sabah, son post hep akşam" gibi bir kalıp yok. Bitiş, sert
 # pencere sonundan (POSTING_WINDOW_END) biraz önce tutuluyor ki yoklama
 # gecikmesi + jitter yüzünden son slot pencere dışına kaçmasın.
-SLOT_RANGE = ((9, 0), (23, 0))
+SLOT_RANGE = ((9, 0), (20, 40))
 # Aynı gün içindeki iki paylaşım arasında en az bu kadar süre olur (planlanan
 # saatler arasında; dış tetikleyici gecikse bile art arda paylaşım yapılmaz).
 MIN_GAP_MINUTES = 100
