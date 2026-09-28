@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -50,9 +50,9 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "y
 MEDIA_SELECTION = os.environ.get("MEDIA_SELECTION", "random").strip().lower()
 MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "0"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
-# Instagram'ın kendi günlük paylaşım limitine (~25) yaklaşınca kalan
-# çalıştırmalar indirme/işleme yapmadan sessizce atlanır.
-DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "20"))
+# Günlük sert tavan — bu sayıya ulaşınca kalan çalıştırmalar indirme/işleme
+# yapmadan sessizce atlanır (elle tetiklemeler dahil).
+DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "4"))
 
 
 def log(msg: str) -> None:
@@ -161,6 +161,57 @@ def upload_video(local_path: Path, remote_name: str) -> str:
 def delete_video(remote_name: str) -> None:
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/videos/{remote_name}"
     requests.delete(url, headers=supabase_headers())
+
+
+# "sources/" klasörü, videoların ORİJİNAL (işlenmemiş) hallerini KALICI olarak
+# saklar — "videos/" klasörünün aksine cleanup_old_videos() bu klasöre hiç
+# dokunmaz. Amaç: aynı video ikinci/üçüncü kez (bir sonraki turda) tekrar
+# paylaşılacağı zaman Instagram'a tekrar tekrar istek atıp (sayfa scrape etme,
+# DASH manifesti okuma vb.) indirmek yerine, ilk indirmede alınan kopyayı
+# yeniden kullanmak — hem daha güvenilir hem de Instagram'a atılan gereksiz
+# istek sayısını azaltıyor.
+SOURCE_PREFIX = "sources"
+
+
+def _source_remote_path(video_id: str) -> str:
+    return f"{SOURCE_PREFIX}/{video_id}.mp4"
+
+
+def download_cached_source(video_id: str) -> Optional[bytes]:
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{_source_remote_path(video_id)}"
+    r = requests.get(url, headers=supabase_headers())
+    if r.status_code == 200 and len(r.content) > 100_000:
+        return r.content
+    return None
+
+
+def upload_source(video_id: str, data: bytes) -> None:
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{_source_remote_path(video_id)}"
+    r = requests.put(
+        url,
+        headers={**supabase_headers(), "Content-Type": "video/mp4", "x-upsert": "true"},
+        data=data,
+    )
+    if not r.ok:
+        log(
+            f"UYARI: {video_id} kaynak videosu önbelleğe yüklenemedi "
+            f"(HTTP {r.status_code}), bir sonraki seferde yine Instagram'dan indirilecek."
+        )
+
+
+def fetch_video_bytes_cached(candidate: dict) -> Optional[bytes]:
+    """fetch_video_bytes()'in önbellekli hali: video daha önce başarıyla
+    indirilmişse Instagram'a hiç gitmeden Supabase'teki kalıcı kopyayı
+    döndürür; ilk seferde normal şekilde indirip kalıcı önbelleğe yükler."""
+    video_id = candidate["id"]
+    cached = download_cached_source(video_id)
+    if cached:
+        log(f"  {video_id}: önbellekteki kaynak video kullanıldı (Instagram'a tekrar istek atılmadı).")
+        return cached
+    data = fetch_video_bytes(candidate)
+    if data:
+        upload_source(video_id, data)
+    return data
 
 
 def cleanup_old_videos(max_age_hours: int = 24) -> None:
@@ -552,65 +603,75 @@ def publish_media(creation_id: str) -> str:
 
 # ---------- Video işleme ----------
 
-def process_video(src: Path, dst: Path) -> None:
+def _distinct_enough(params: dict, last: Optional[dict]) -> bool:
+    """Aynı video ikinci/üçüncü kez remix'lenirken bir önceki sefere göre
+    gözle görülür şekilde farklı çıksın diye — sürekli rastgele sayılarla
+    zaten pratikte birebir aynı çıkması imkansıza yakın, ama yine de en az
+    bir parametrenin belirgin biçimde farklı olduğunu garanti ediyoruz."""
+    if not last:
+        return True
+    return (
+        abs(params["crop_pct"] - last.get("crop_pct", 0)) > 0.01
+        or abs(params["brightness"] - last.get("brightness", 0)) > 0.015
+        or abs(params["contrast"] - last.get("contrast", 1)) > 0.04
+        or abs(params["saturation"] - last.get("saturation", 1)) > 0.04
+        or abs(params["speed"] - last.get("speed", 1)) > 0.01
+    )
+
+
+def process_video(src: Path, dst: Path, last_params: Optional[dict] = None) -> dict:
     """Videoyu renk/kontrast varyasyonu + hafif keskinlik/vinyet ile işler ve
     hafif hız değişimi uygular. Üst yazı yok.
 
     Not: Yatay çevirme (hflip) kasıtlı olarak kullanılmıyor — kaynak videonun
-    içine gömülü yazılar varsa çevirmede ters/okunmaz hale geliyordu."""
-    filters = []
+    içine gömülü yazılar varsa çevirmede ters/okunmaz hale geliyordu.
 
-    crop_pct = round(random.uniform(0.94, 0.98), 3)
+    last_params verilirse (aynı video daha önce remix'lenmişse), üretilen
+    parametrelerin ondan belirgin şekilde farklı olması garanti edilir —
+    aynı kaynak video yeniden kullanıldığında (kaynak artık önbellekten
+    geliyor) her seferinde görünürde de farklı bir remix çıksın diye.
+    Kullanılan parametreler, çağıran tarafından state'e kaydedilmek üzere
+    döndürülür."""
+    for _ in range(8):
+        crop_pct = round(random.uniform(0.94, 0.98), 3)
+        brightness = round(random.uniform(-0.04, 0.04), 3)
+        contrast = round(random.uniform(0.92, 1.12), 3)
+        saturation = round(random.uniform(0.9, 1.15), 3)
+        unsharp_amount = round(random.uniform(0.3, 0.7), 2)
+        vignette_angle = round(random.uniform(math.pi / 12, math.pi / 8), 3)
+        speed = round(random.uniform(0.97, 1.04), 3)
+        params = {
+            "crop_pct": crop_pct,
+            "brightness": brightness,
+            "contrast": contrast,
+            "saturation": saturation,
+            "unsharp_amount": unsharp_amount,
+            "vignette_angle": vignette_angle,
+            "speed": speed,
+        }
+        if _distinct_enough(params, last_params):
+            break
+
+    filters = []
     filters.append(f"crop=iw*{crop_pct}:ih*{crop_pct}")
     # Kaynak videonun çözünürlüğünü büyütmüyoruz (upscale kalite kaybına yol
     # açıyordu) — sadece x264'ün gerektirdiği gibi çift sayıya yuvarlıyoruz.
     filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-
-    brightness = round(random.uniform(-0.04, 0.04), 3)
-    contrast = round(random.uniform(0.92, 1.12), 3)
-    saturation = round(random.uniform(0.9, 1.15), 3)
     filters.append(f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}")
 
     # Hafif keskinlik ve çok hafif kenar kararması (vinyet) — belirgin/dikkat
     # çekici olmayacak kadar hafif tutuluyor.
-    unsharp_amount = round(random.uniform(0.3, 0.7), 2)
     filters.append(f"unsharp=5:5:{unsharp_amount}:5:5:0.0")
-    vignette_angle = round(random.uniform(math.pi / 12, math.pi / 8), 3)
     filters.append(f"vignette={vignette_angle}")
 
     filter_chain = ",".join(filters)
 
-    # Hafif hız değişimi (video + ses birlikte) — hem görsel imzayı biraz daha
-    # değiştirir hem de videoya hafif dinamizm katar.
-    speed = round(random.uniform(0.97, 1.04), 3)
-
-    # Takip Et butonuna işaret eden zıplayan bildirim ikonu — buton videonun
-    # sol-alt bölgesinde (ekranın altdan ~%25-30'u) çıktığı için ikonu onun
-    # hemen üstüne, sol tarafa yerleştiriyoruz.
-    gif_path = Path(__file__).resolve().parent.parent / "assets" / "follow_notif.gif"
-    use_overlay = gif_path.exists()
-
-    if use_overlay:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(src),
-            "-stream_loop", "-1", "-i", str(gif_path),
-            "-filter_complex",
-            f"[0:v]{filter_chain},setpts={1 / speed:.4f}*PTS[base];"
-            f"[1:v]scale=89:-1[ovl];"
-            f"[base][ovl]overlay=x=W*0.38:y=H*0.90-99:shortest=1[outv]",
-            "-map", "[outv]", "-map", "0:a",
-            "-af", f"atempo={speed}",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        ]
-    else:
-        log(f"UYARI: {gif_path} bulunamadı, Takip Et animasyonu olmadan işleniyor.")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(src),
-            "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
-            "-af", f"atempo={speed}",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        ]
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", f"{filter_chain},setpts={1 / speed:.4f}*PTS",
+        "-af", f"atempo={speed}",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+    ]
     # Artık kaynağı gerçek yüksek çözünürlükte (1080x1920'ye kadar) indirdiğimiz
     # için uzun videolarda sabit CRF çıktısı Supabase'in obje boyutu limitini
     # ("Payload too large") aşabiliyor. Videonun süresine göre bir üst bitrate
@@ -628,6 +689,7 @@ def process_video(src: Path, dst: Path) -> None:
         str(dst),
     ]
     subprocess.run(cmd, check=True)
+    return params
 
 
 def _probe_duration_seconds(path: Path) -> Optional[float]:
@@ -675,7 +737,7 @@ def get_view_counts(state: dict, videos: list) -> dict:
 # paylaşım yapmayı reddediyor. Elle tetiklemeler (workflow_dispatch, test
 # amaçlı) bu kısıtlamaya tabi değil.
 POSTING_WINDOW_START = (8, 30)   # TSİ (Europe/Istanbul)
-POSTING_WINDOW_END = (21, 45)    # TSİ
+POSTING_WINDOW_END = (23, 30)    # TSİ
 
 
 def _within_posting_window() -> bool:
@@ -685,48 +747,103 @@ def _within_posting_window() -> bool:
     return start <= now <= end
 
 
-DAILY_TARGET_RANGE = (18, 25)  # her gün rastgele seçilen günlük hedef aralığı
+# 25/gün civarı paylaşım Instagram'dan "otomatik davranış" uyarısı almamıza
+# yol açtı; artık günde yalnızca 3-4 paylaşım yapılıyor.
+DAILY_TARGET_RANGE = (3, 4)
+# Günün paylaşım saatleri bu aralığın TAMAMINA rastgele dağıtılıyor —
+# "ilk post hep sabah, son post hep akşam" gibi bir kalıp yok. Bitiş, sert
+# pencere sonundan (POSTING_WINDOW_END) biraz önce tutuluyor ki yoklama
+# gecikmesi + jitter yüzünden son slot pencere dışına kaçmasın.
+SLOT_RANGE = ((9, 0), (23, 0))
+# Aynı gün içindeki iki paylaşım arasında en az bu kadar süre olur (planlanan
+# saatler arasında; dış tetikleyici gecikse bile art arda paylaşım yapılmaz).
+MIN_GAP_MINUTES = 150
+# Bir önceki günün paylaşım saatlerine bu kadar dakikadan yakın saat
+# seçilmez — ardışık günlerde "hep aynı saatlerde paylaşım" oluşmasın diye.
+AVOID_PREV_DAY_MINUTES = 40
+
+
+def _tr_now() -> datetime:
+    return datetime.now(ZoneInfo("Europe/Istanbul"))
+
+
+def _minute_of_day(ts: int) -> int:
+    t = datetime.fromtimestamp(ts, ZoneInfo("Europe/Istanbul"))
+    return t.hour * 60 + t.minute
+
+
+def _plan_daily_slots(target: int, prev_slots: Optional[list] = None) -> list:
+    """Günün paylaşım saatlerini (epoch saniye) günün ilk yoklamasında bir kez
+    rastgele belirler: SLOT_RANGE'in tamamına dağılır, aralarında en az
+    MIN_GAP_MINUTES olur ve bir önceki günün saatlerinin
+    ±AVOID_PREV_DAY_MINUTES yakınına denk gelmez."""
+    now = _tr_now()
+    lo, hi = SLOT_RANGE
+    range_start = now.replace(hour=lo[0], minute=lo[1], second=0, microsecond=0)
+    range_end = now.replace(hour=hi[0], minute=hi[1], second=0, microsecond=0)
+    span = (range_end - range_start).total_seconds()
+    min_gap = MIN_GAP_MINUTES * 60
+    prev_minutes = [_minute_of_day(t) for t in (prev_slots or [])]
+
+    def ok(offsets: list, check_prev: bool) -> bool:
+        if any(b - a < min_gap for a, b in zip(offsets, offsets[1:])):
+            return False
+        if check_prev:
+            for o in offsets:
+                m = _minute_of_day(int(range_start.timestamp() + o))
+                if any(abs(m - pm) < AVOID_PREV_DAY_MINUTES for pm in prev_minutes):
+                    return False
+        return True
+
+    # Önce dünün saatlerinden kaçınarak dene; (pratikte olmaz ama) bulamazsa
+    # yalnızca aralık kuralıyla yetin.
+    for check_prev in (True, False):
+        for _ in range(5000):
+            offsets = sorted(random.uniform(0, span) for _ in range(target))
+            if ok(offsets, check_prev):
+                return [int(range_start.timestamp() + o) for o in offsets]
+    seg = span / target
+    offsets = [seg * i + random.uniform(0, seg * 0.4) for i in range(target)]
+    return [int(range_start.timestamp() + o) for o in offsets]
+
+
+def _fmt_slots(slots: list) -> str:
+    tz = ZoneInfo("Europe/Istanbul")
+    return ", ".join(datetime.fromtimestamp(t, tz).strftime("%H:%M") for t in slots)
 
 
 def _decide_auto_batch_size(daily: dict) -> int:
-    """Dış zamanlayıcı sık aralıklarla (ör. 30-45 dakikada bir) "yoklama"
-    yapıyor; her yoklamada script kendi kendine karar veriyor. Bu sayede
-    paylaşım saatleri ve miktarları her gün farklı, öngörülemez oluyor —
-    sabit saatlerde sabit sayıda paylaşım Instagram'a bot gibi görünürken,
-    bu tempo bir insanın günlük paylaşım alışkanlığına daha çok benziyor."""
-    if "target" not in daily:
+    """Dış zamanlayıcı sık aralıklarla (ör. 15-30 dakikada bir) "yoklama"
+    yapıyor. Günün ilk yoklamasında o günün paylaşım sayısı (3-4) ve
+    saatleri rastgele planlanıyor; sonraki her yoklamada, saati gelmiş ama
+    henüz paylaşılmamış bir slot varsa TEK video paylaşılıyor. Böylece her
+    gün farklı saatlerde, aralıklı ve az sayıda paylaşım yapılıyor."""
+    if "slots" not in daily:
         daily["target"] = random.randint(*DAILY_TARGET_RANGE)
+        daily["slots"] = _plan_daily_slots(daily["target"], daily.get("prev_slots"))
+        log(f"Bugünün paylaşım planı ({daily['target']} video): {_fmt_slots(daily['slots'])} TSİ")
 
-    remaining_target = daily["target"] - daily["count"]
-    if remaining_target <= 0:
-        return 0
-
-    # "auto" modu workflow_dispatch (dış zamanlayıcının API çağrısı) olarak
-    # gelir, bu yüzden schedule-özel gece koruması (_within_posting_window
-    # çağrısı main()'de) buraya uğramaz. Dış zamanlayıcı hatalı/geç
-    # tetiklerse bile gece paylaşım olmasın diye burada da SERT bir kontrol
-    # var — pencere dışındaysa hiç hesap yapmadan direkt 0.
+    # Dış zamanlayıcı hatalı/geç tetiklerse bile gece paylaşım olmasın diye
+    # SERT kontrol — pencere dışındaysa direkt 0.
     if not _within_posting_window():
         return 0
 
-    now = datetime.now(ZoneInfo("Europe/Istanbul"))
-    window_start = now.replace(hour=POSTING_WINDOW_START[0], minute=POSTING_WINDOW_START[1], second=0, microsecond=0)
-    window_end = now.replace(hour=POSTING_WINDOW_END[0], minute=POSTING_WINDOW_END[1], second=0, microsecond=0)
-    total = (window_end - window_start).total_seconds()
-    elapsed = max(0.0, min(total, (now - window_start).total_seconds()))
-    elapsed_fraction = elapsed / total if total > 0 else 1.0
-
-    expected_by_now = elapsed_fraction * daily["target"]
-    behind_schedule = daily["count"] < expected_by_now
-
-    # Hedefin gerisindeysek (ör. önceki yoklamalar atlanmışsa) yetişmek için
-    # daha kararlı davran; önündeysek/tam üstündeysek daha çok rastgelelik
-    # katarak insansı, düzensiz bir desen oluştur.
-    chance = 0.75 if behind_schedule else 0.25
-    if random.random() > chance:
+    now_ts = time.time()
+    due = sum(1 for t in daily["slots"] if t <= now_ts)
+    if daily["count"] >= due:
+        upcoming = [t for t in daily["slots"] if t > now_ts]
+        if upcoming:
+            log(f"Sıradaki planlı paylaşım: {_fmt_slots(upcoming[:1])} TSİ")
         return 0
 
-    return min(random.randint(1, 3), remaining_target)
+    # Yoklamalar bir süre atlanıp birden fazla slot birikmiş olsa bile art
+    # arda paylaşım yapmıyoruz; son paylaşımdan bu yana en az MIN_GAP_MINUTES
+    # geçmediyse bekleniyor (biriken slot sonraki yoklamalarda eritilir).
+    last = daily.get("last_post_at")
+    if last and now_ts - last < MIN_GAP_MINUTES * 60:
+        return 0
+
+    return 1
 
 
 JITTER_MAX_SECONDS = 600  # 10 dakika
@@ -791,22 +908,23 @@ def _run() -> None:
 
     posted_ids = set(state.get("_posted_ids", []))
     daily = state.get("_daily", {})
-    today = date.today().isoformat()
+    # Runner UTC'de çalışıyor; gün sınırı Türkiye saatine göre olmalı.
+    today = _tr_now().date().isoformat()
     if daily.get("date") != today:
-        daily = {"date": today, "count": 0}
+        # Dünün saatlerini sakla ki bugünün planı onlara yakın düşmesin.
+        daily = {"date": today, "count": 0, "prev_slots": daily.get("slots", [])}
 
     # POSTS_PER_RUN="auto" (dış zamanlayıcının kullandığı mod): script her
     # "yoklama" çağrısında KENDİSİ karar veriyor — şimdi paylaşım yapsın mı,
-    # yapacaksa kaç video (1-3)? Sabit saatlerde sabit sayıda paylaşmak yerine
-    # bu, Instagram'a insan gibi görünen, günden güne değişen, öngörülemeyen
-    # bir paylaşım deseni oluşturuyor. Sabit bir sayı verilirse (ör. testte
+    # yapacaksa kaç video? Günde 3-4 video, her gün rastgele planlanan farklı
+    # saatlerde paylaşılıyor (bkz. _decide_auto_batch_size). Sabit bir sayı verilirse (ör. testte
     # "3") o sayı olduğu gibi kullanılır.
     posts_per_run_raw = os.environ.get("POSTS_PER_RUN", "1").strip().lower()
     if posts_per_run_raw == "auto":
         posts_per_run = _decide_auto_batch_size(daily)
         if posts_per_run == 0:
-            log("Bu yoklamada paylaşım yapılmayacak (tempo/rastgelelik gereği atlandı).")
-            state["_daily"] = daily  # _decide_auto_batch_size günlük hedefi state'e yazmış olabilir
+            log("Bu yoklamada paylaşım yapılmayacak (planlı saat henüz gelmedi).")
+            state["_daily"] = daily  # _decide_auto_batch_size günün planını state'e yazmış olabilir
             save_state(state)
             return
         log(f"Bu yoklamada {posts_per_run} video paylaşılacak (otomatik tempo).")
@@ -921,6 +1039,7 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
     candidate = None
     public_url = None
     remote_name = None
+    chosen_edit_params = None
     def _mark_attempted(v):
         # Bir video hiçbir yöntemle indirilemiyorsa (ör. kalıcı olarak
         # erişilemez/silinmiş), state'te hiçbir zaman "kullanıldı"
@@ -936,7 +1055,7 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
             state[v["id"]] = entry
 
     for v in ordered:
-        data = fetch_video_bytes(v)
+        data = fetch_video_bytes_cached(v)
         if not data:
             log(f"UYARI: {v['id']} indirilemedi, sıradaki video deneniyor.")
             _mark_attempted(v)
@@ -946,8 +1065,9 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
             src = Path(tmp) / "source.mp4"
             dst = Path(tmp) / "processed.mp4"
             src.write_bytes(data)
+            last_params = state.get(v["id"], {}).get("last_edit_params")
             try:
-                process_video(src, dst)
+                chosen_edit_params = process_video(src, dst, last_params)
             except subprocess.CalledProcessError as exc:
                 log(f"UYARI: {v['id']} işlenemedi (ffmpeg hatası: {exc}), sıradaki video deneniyor.")
                 _mark_attempted(v)
@@ -1014,10 +1134,13 @@ def _post_one(state: dict, videos_all: list, posted_ids: set, daily: dict, alrea
     entry = state.get(candidate["id"], {"repost_count": 0})
     entry["repost_count"] = entry.get("repost_count", 0) + 1
     entry["last_reposted_at"] = int(time.time())
+    if chosen_edit_params:
+        entry["last_edit_params"] = chosen_edit_params
     if MEDIA_SELECTION == "top_viewed_cycle":
         entry["last_cycle_used"] = cycle
     state[candidate["id"]] = entry
     daily["count"] += 1
+    daily["last_post_at"] = int(time.time())
     state["_daily"] = daily
     posted_ids.add(media_id)
     state["_posted_ids"] = list(posted_ids)

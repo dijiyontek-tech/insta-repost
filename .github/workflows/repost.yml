@@ -8,11 +8,10 @@ on:
   # (27 Ağustos, 1 Eylül) hiç tetiklenmedi. Dakika kaydırmak da yetmedi.
   # Bunun yerine, dış bir zamanlayıcı servisi (cron-job.org) günde birçok kez
   # (ör. her 30-45 dakikada bir) GitHub API'sinin workflow_dispatch uç
-  # noktasını "posts_per_run": "auto" ile çağırıyor — script'in kendisi her
-  # çağrıda paylaşım yapıp yapmayacağına ve kaç video paylaşacağına (1-3)
-  # kendi kendine karar veriyor (bkz. _decide_auto_batch_size). Bu, sabit
-  # saatlerde sabit sayıda paylaşım yerine gün gün değişen, öngörülemez —
-  # insana benzer — bir paylaşım deseni oluşturuyor.
+  # noktasını "posts_per_run": "auto" ile çağırıyor — script günün ilk
+  # çağrısında o gün kaç video (3-4) paylaşılacağını ve saatlerini rastgele
+  # planlıyor, sonraki çağrılarda saati gelen slot için tek video paylaşıyor
+  # (bkz. _decide_auto_batch_size). Saatler her gün farklı çıkıyor.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -68,12 +67,11 @@ jobs:
           SUPABASE_BUCKET: insta-repost
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
-          # Günlük yumuşak hedef script içinde her gün rastgele 18-25 arası
-          # seçiliyor (DAILY_TARGET_RANGE); bu, o hedefin asla aşılmayacağı
-          # SERT bir tavan. Instagram'ın gerçek günlük paylaşım limitine daha
-          # önce ~19-20'de çarpmıştık; script bunu artık hatasız atlayıp
-          # sonraki yoklamada devam ediyor.
-          DAILY_PUBLISH_LIMIT: "25"
+          # Günlük hedef script içinde her gün rastgele 3-4 seçiliyor
+          # (DAILY_TARGET_RANGE); bu, elle tetiklemeler dahil asla
+          # aşılmayacak SERT tavan. (Eskiden ~25/gün paylaşıyorduk, Instagram
+          # "otomatik davranış" uyarısı verdi.)
+          DAILY_PUBLISH_LIMIT: "4"
           DRY_RUN: ${{ inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
           MIN_VIEW_COUNT: "0"
