@@ -9,7 +9,7 @@ on:
   # Bunun yerine, dış bir zamanlayıcı servisi (cron-job.org) günde birçok kez
   # (ör. her 30-45 dakikada bir) GitHub API'sinin workflow_dispatch uç
   # noktasını "posts_per_run": "auto" ile çağırıyor — script günün ilk
-  # çağrısında o gün kaç video (3-4) paylaşılacağını ve saatlerini rastgele
+  # çağrısında o gün kaç video (4-6) paylaşılacağını ve saatlerini rastgele
   # planlıyor, sonraki çağrılarda saati gelen slot için tek video paylaşıyor
   # (bkz. _decide_auto_batch_size). Saatler her gün farklı çıkıyor.
   workflow_dispatch:
@@ -28,6 +28,10 @@ on:
         default: top_viewed_cycle
       reset_cycle:
         description: "Bakım: tur takibini sıfırla (video seçmez, paylaşım yapmaz)"
+        type: boolean
+        default: false
+      sync_library:
+        description: "Bakım: hesaptaki tüm videoları kütüphaneye (Supabase sources/) indir, paylaşım yapmaz"
         type: boolean
         default: false
       target_media_id:
@@ -67,16 +71,17 @@ jobs:
           SUPABASE_BUCKET: insta-repost
           CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
           MAX_REPOSTS_PER_VIDEO: "1"
-          # Günlük hedef script içinde her gün rastgele 3-4 seçiliyor
+          # Günlük hedef script içinde her gün rastgele 4-6 seçiliyor
           # (DAILY_TARGET_RANGE); bu, elle tetiklemeler dahil asla
           # aşılmayacak SERT tavan. (Eskiden ~25/gün paylaşıyorduk, Instagram
           # "otomatik davranış" uyarısı verdi.)
-          DAILY_PUBLISH_LIMIT: "4"
+          DAILY_PUBLISH_LIMIT: "6"
           DRY_RUN: ${{ inputs.dry_run }}
           MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
           MIN_VIEW_COUNT: "0"
           RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
           TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
+          SYNC_LIBRARY: ${{ inputs.sync_library || 'false' }}
           # Dış zamanlayıcının çağrılarında "auto" gönderilir (script kendi
           # kendine karar verir); elle test ederken varsayılan "1"dir,
           # istenirse sabit bir sayı da girilebilir.

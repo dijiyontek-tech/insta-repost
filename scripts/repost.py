@@ -52,7 +52,7 @@ MIN_VIEW_COUNT = int(os.environ.get("MIN_VIEW_COUNT", "0"))
 TRIAL_REEL = os.environ.get("TRIAL_REEL", "false").strip().lower() in ("1", "true", "yes")
 # Günlük sert tavan — bu sayıya ulaşınca kalan çalıştırmalar indirme/işleme
 # yapmadan sessizce atlanır (elle tetiklemeler dahil).
-DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "4"))
+DAILY_PUBLISH_LIMIT = int(os.environ.get("DAILY_PUBLISH_LIMIT", "6"))
 
 
 def log(msg: str) -> None:
@@ -212,6 +212,60 @@ def fetch_video_bytes_cached(candidate: dict) -> Optional[bytes]:
     if data:
         upload_source(video_id, data)
     return data
+
+
+def list_cached_sources() -> dict:
+    """sources/ klasöründeki videoları {video_id: boyut_bayt} olarak döndürür."""
+    url = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
+    found = {}
+    offset = 0
+    while True:
+        r = requests.post(
+            url,
+            headers=supabase_headers(),
+            json={"prefix": SOURCE_PREFIX, "limit": 1000, "offset": offset},
+        )
+        raise_for_status_verbose(r)
+        batch = r.json()
+        for item in batch:
+            name = item.get("name") or ""
+            if name.endswith(".mp4"):
+                found[name[:-4]] = (item.get("metadata") or {}).get("size", 0)
+        if len(batch) < 1000:
+            return found
+        offset += 1000
+
+
+def sync_library(videos: list, posted_ids: set) -> None:
+    """Hesaptaki TÜM orijinal videoları bir kez indirip sources/ klasörüne
+    (video kütüphanesi) koyar. Zaten kütüphanede olanlara dokunmaz; böylece
+    paylaşım anında Instagram'dan hiç indirme yapılmaz, video kütüphaneden
+    alınıp renklendirilerek paylaşılır."""
+    cached = list_cached_sources()
+    originals = [v for v in videos if v["id"] not in posted_ids]
+    missing = [v for v in originals if v["id"] not in cached]
+    log(
+        f"Kütüphane: {len(originals)} orijinal videonun {len(originals) - len(missing)} tanesi "
+        f"zaten kütüphanede, {len(missing)} tanesi indirilecek."
+    )
+    failed = []
+    for i, v in enumerate(missing, 1):
+        data = fetch_video_bytes(v)
+        if not data:
+            failed.append(v["id"])
+            continue
+        upload_source(v["id"], data)
+        cached[v["id"]] = len(data)
+        log(f"  [{i}/{len(missing)}] {v['id']} kütüphaneye eklendi ({len(data) / 1e6:.1f} MB).")
+        # Instagram'a art arda seri istek atmamak için kısa, rastgele ara.
+        time.sleep(random.uniform(3, 8))
+    total_mb = sum(cached.values()) / 1e6
+    log(
+        f"Kütüphane güncel: {len(cached)} video, toplam {total_mb:.0f} MB. "
+        f"İndirilemeyen: {len(failed)}{' (' + ', '.join(failed) + ')' if failed else ''}."
+    )
+    if total_mb > 850:
+        log("UYARI: kütüphane Supabase ücretsiz planın 1 GB depolama sınırına yaklaşıyor.")
 
 
 def cleanup_old_videos(max_age_hours: int = 24) -> None:
@@ -748,8 +802,8 @@ def _within_posting_window() -> bool:
 
 
 # 25/gün civarı paylaşım Instagram'dan "otomatik davranış" uyarısı almamıza
-# yol açtı; artık günde yalnızca 3-4 paylaşım yapılıyor.
-DAILY_TARGET_RANGE = (3, 4)
+# yol açtı; artık günde yalnızca 4-6 paylaşım yapılıyor.
+DAILY_TARGET_RANGE = (4, 6)
 # Günün paylaşım saatleri bu aralığın TAMAMINA rastgele dağıtılıyor —
 # "ilk post hep sabah, son post hep akşam" gibi bir kalıp yok. Bitiş, sert
 # pencere sonundan (POSTING_WINDOW_END) biraz önce tutuluyor ki yoklama
@@ -757,10 +811,10 @@ DAILY_TARGET_RANGE = (3, 4)
 SLOT_RANGE = ((9, 0), (23, 0))
 # Aynı gün içindeki iki paylaşım arasında en az bu kadar süre olur (planlanan
 # saatler arasında; dış tetikleyici gecikse bile art arda paylaşım yapılmaz).
-MIN_GAP_MINUTES = 150
+MIN_GAP_MINUTES = 100
 # Bir önceki günün paylaşım saatlerine bu kadar dakikadan yakın saat
 # seçilmez — ardışık günlerde "hep aynı saatlerde paylaşım" oluşmasın diye.
-AVOID_PREV_DAY_MINUTES = 40
+AVOID_PREV_DAY_MINUTES = 25
 
 
 def _tr_now() -> datetime:
@@ -814,7 +868,7 @@ def _fmt_slots(slots: list) -> str:
 
 def _decide_auto_batch_size(daily: dict) -> int:
     """Dış zamanlayıcı sık aralıklarla (ör. 15-30 dakikada bir) "yoklama"
-    yapıyor. Günün ilk yoklamasında o günün paylaşım sayısı (3-4) ve
+    yapıyor. Günün ilk yoklamasında o günün paylaşım sayısı (4-6) ve
     saatleri rastgele planlanıyor; sonraki her yoklamada, saati gelmiş ama
     henüz paylaşılmamış bir slot varsa TEK video paylaşılıyor. Böylece her
     gün farklı saatlerde, aralıklı ve az sayıda paylaşım yapılıyor."""
@@ -907,6 +961,12 @@ def _run() -> None:
         return
 
     posted_ids = set(state.get("_posted_ids", []))
+
+    if os.environ.get("SYNC_LIBRARY", "false").strip().lower() in ("1", "true", "yes"):
+        # Bakım komutu: tüm videoları kütüphaneye indirir, paylaşım yapmaz.
+        sync_library(fetch_own_videos(), posted_ids)
+        return
+
     daily = state.get("_daily", {})
     # Runner UTC'de çalışıyor; gün sınırı Türkiye saatine göre olmalı.
     today = _tr_now().date().isoformat()
@@ -916,7 +976,7 @@ def _run() -> None:
 
     # POSTS_PER_RUN="auto" (dış zamanlayıcının kullandığı mod): script her
     # "yoklama" çağrısında KENDİSİ karar veriyor — şimdi paylaşım yapsın mı,
-    # yapacaksa kaç video? Günde 3-4 video, her gün rastgele planlanan farklı
+    # yapacaksa kaç video? Günde 4-6 video, her gün rastgele planlanan farklı
     # saatlerde paylaşılıyor (bkz. _decide_auto_batch_size). Sabit bir sayı verilirse (ör. testte
     # "3") o sayı olduğu gibi kullanılır.
     posts_per_run_raw = os.environ.get("POSTS_PER_RUN", "1").strip().lower()
