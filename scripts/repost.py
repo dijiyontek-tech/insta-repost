@@ -163,109 +163,187 @@ def delete_video(remote_name: str) -> None:
     requests.delete(url, headers=supabase_headers())
 
 
-# "sources/" klasörü, videoların ORİJİNAL (işlenmemiş) hallerini KALICI olarak
-# saklar — "videos/" klasörünün aksine cleanup_old_videos() bu klasöre hiç
-# dokunmaz. Amaç: aynı video ikinci/üçüncü kez (bir sonraki turda) tekrar
-# paylaşılacağı zaman Instagram'a tekrar tekrar istek atıp (sayfa scrape etme,
-# DASH manifesti okuma vb.) indirmek yerine, ilk indirmede alınan kopyayı
-# yeniden kullanmak — hem daha güvenilir hem de Instagram'a atılan gereksiz
-# istek sayısını azaltıyor.
+# ---------- Video kütüphanesi (GitHub Releases) ----------
+#
+# Videoların ORİJİNAL (işlenmemiş) halleri, bu reponun "video-library"
+# adlı release'ine dosya (asset) olarak KALICI şekilde konur. Paylaşım
+# zamanı gelince video buradan alınıp renklendirilerek paylaşılır;
+# Instagram'dan tekrar tekrar indirilmez. (Önceden Supabase'te sources/
+# klasöründe tutuluyordu ama ücretsiz planın 1 GB sınırı yüksek kaliteli
+# tüm kütüphaneye yetmiyor; GitHub release dosyalarında pratik bir toplam
+# boyut sınırı yok.)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
+LIBRARY_TAG = "video-library"
+_GH_API = "https://api.github.com"
+
+# Supabase'teki eski kütüphane klasörü — yalnızca taşıma sonrası temizlik için.
 SOURCE_PREFIX = "sources"
 
+_library_cache: Optional[dict] = None  # {video_id: {"id": asset_id, "size": bayt}}
+_release_id: Optional[int] = None
 
-def _source_remote_path(video_id: str) -> str:
-    return f"{SOURCE_PREFIX}/{video_id}.mp4"
+
+def _gh_headers(**extra) -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        **extra,
+    }
 
 
-def download_cached_source(video_id: str) -> Optional[bytes]:
-    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{_source_remote_path(video_id)}"
-    r = requests.get(url, headers=supabase_headers())
+def _library_release_id() -> int:
+    global _release_id
+    if _release_id is None:
+        r = requests.get(f"{_GH_API}/repos/{GITHUB_REPOSITORY}/releases/tags/{LIBRARY_TAG}", headers=_gh_headers())
+        if r.status_code == 404:
+            r = requests.post(
+                f"{_GH_API}/repos/{GITHUB_REPOSITORY}/releases",
+                headers=_gh_headers(),
+                json={
+                    "tag_name": LIBRARY_TAG,
+                    "name": "Video kütüphanesi",
+                    "body": "Otomasyonun kullandığı orijinal videolar (en yüksek kalite). Elle düzenlemeyin.",
+                    "prerelease": True,
+                },
+            )
+        raise_for_status_verbose(r)
+        _release_id = r.json()["id"]
+    return _release_id
+
+
+def library_list() -> dict:
+    """Kütüphanedeki videoları {video_id: {"id": asset_id, "size": bayt}} olarak döndürür."""
+    global _library_cache
+    if _library_cache is None:
+        found = {}
+        page = 1
+        while True:
+            r = requests.get(
+                f"{_GH_API}/repos/{GITHUB_REPOSITORY}/releases/{_library_release_id()}/assets",
+                headers=_gh_headers(),
+                params={"per_page": 100, "page": page},
+            )
+            raise_for_status_verbose(r)
+            batch = r.json()
+            for a in batch:
+                if a["name"].endswith(".mp4"):
+                    found[a["name"][:-4]] = {"id": a["id"], "size": a["size"]}
+            if len(batch) < 100:
+                break
+            page += 1
+        _library_cache = found
+    return _library_cache
+
+
+def library_get(video_id: str) -> Optional[bytes]:
+    asset = library_list().get(video_id)
+    if not asset:
+        return None
+    # İndirme isteği imzalı bir depolama URL'sine yönlendiriliyor; requests
+    # başka bir alan adına yönlendirmede Authorization başlığını zaten
+    # göndermiyor, bu doğru davranış.
+    r = requests.get(
+        f"{_GH_API}/repos/{GITHUB_REPOSITORY}/releases/assets/{asset['id']}",
+        headers=_gh_headers(Accept="application/octet-stream"),
+        timeout=120,
+    )
     if r.status_code == 200 and len(r.content) > 100_000:
         return r.content
+    log(f"UYARI: {video_id} kütüphaneden indirilemedi (HTTP {r.status_code}).")
     return None
 
 
-def upload_source(video_id: str, data: bytes) -> None:
-    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{_source_remote_path(video_id)}"
-    r = requests.put(
-        url,
-        headers={**supabase_headers(), "Content-Type": "video/mp4", "x-upsert": "true"},
+def library_put(video_id: str, data: bytes) -> bool:
+    lib = library_list()
+    if video_id in lib:
+        requests.delete(
+            f"{_GH_API}/repos/{GITHUB_REPOSITORY}/releases/assets/{lib[video_id]['id']}",
+            headers=_gh_headers(),
+        )
+        lib.pop(video_id, None)
+    r = requests.post(
+        f"https://uploads.github.com/repos/{GITHUB_REPOSITORY}/releases/{_library_release_id()}/assets",
+        headers=_gh_headers(**{"Content-Type": "video/mp4"}),
+        params={"name": f"{video_id}.mp4"},
         data=data,
+        timeout=300,
     )
     if not r.ok:
-        log(
-            f"UYARI: {video_id} kaynak videosu önbelleğe yüklenemedi "
-            f"(HTTP {r.status_code}), bir sonraki seferde yine Instagram'dan indirilecek."
-        )
+        log(f"UYARI: {video_id} kütüphaneye yüklenemedi (HTTP {r.status_code}: {r.text[:200]}).")
+        return False
+    lib[video_id] = {"id": r.json()["id"], "size": len(data)}
+    return True
 
 
 def fetch_video_bytes_cached(candidate: dict) -> Optional[bytes]:
-    """fetch_video_bytes()'in önbellekli hali: video daha önce başarıyla
-    indirilmişse Instagram'a hiç gitmeden Supabase'teki kalıcı kopyayı
-    döndürür; ilk seferde normal şekilde indirip kalıcı önbelleğe yükler."""
+    """Video kütüphanede varsa Instagram'a hiç gitmeden oradan döndürür; yoksa
+    (ör. hesaba sonradan eklenmiş yeni bir video) en yüksek kalitede bir kez
+    indirip kütüphaneye ekler."""
     video_id = candidate["id"]
-    cached = download_cached_source(video_id)
+    cached = library_get(video_id)
     if cached:
-        log(f"  {video_id}: önbellekteki kaynak video kullanıldı (Instagram'a tekrar istek atılmadı).")
+        log(f"  {video_id}: kütüphanedeki video kullanıldı (Instagram'dan indirilmedi).")
         return cached
-    data = fetch_video_bytes(candidate)
+    data = fetch_video_bytes_best(candidate)
     if data:
-        upload_source(video_id, data)
+        library_put(video_id, data)
     return data
 
 
-def list_cached_sources() -> dict:
-    """sources/ klasöründeki videoları {video_id: boyut_bayt} olarak döndürür."""
+def _cleanup_legacy_supabase_sources(migrated: set) -> None:
+    """Kütüphaneye taşınmış videoların Supabase sources/ klasöründeki eski
+    (çoğu düşük kaliteli) kopyalarını siler — Supabase'in 1 GB'lık alanı
+    geçici paylaşım dosyaları için boş kalsın."""
     url = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
-    found = {}
-    offset = 0
-    while True:
-        r = requests.post(
-            url,
+    r = requests.post(url, headers=supabase_headers(), json={"prefix": SOURCE_PREFIX, "limit": 1000})
+    if r.status_code != 200:
+        return
+    stale = [
+        f"{SOURCE_PREFIX}/{it['name']}"
+        for it in r.json()
+        if (it.get("name") or "").endswith(".mp4") and it["name"][:-4] in migrated
+    ]
+    for i in range(0, len(stale), 100):
+        requests.delete(
+            f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}",
             headers=supabase_headers(),
-            json={"prefix": SOURCE_PREFIX, "limit": 1000, "offset": offset},
+            json={"prefixes": stale[i:i + 100]},
         )
-        raise_for_status_verbose(r)
-        batch = r.json()
-        for item in batch:
-            name = item.get("name") or ""
-            if name.endswith(".mp4"):
-                found[name[:-4]] = (item.get("metadata") or {}).get("size", 0)
-        if len(batch) < 1000:
-            return found
-        offset += 1000
+    if stale:
+        log(f"Supabase'teki {len(stale)} eski kütüphane kopyası silindi (artık GitHub'da).")
 
 
-def sync_library(videos: list, posted_ids: set) -> None:
-    """Hesaptaki TÜM orijinal videoları bir kez indirip sources/ klasörüne
-    (video kütüphanesi) koyar. Zaten kütüphanede olanlara dokunmaz; böylece
-    paylaşım anında Instagram'dan hiç indirme yapılmaz, video kütüphaneden
-    alınıp renklendirilerek paylaşılır."""
-    cached = list_cached_sources()
+def sync_library(videos: list, state: dict) -> None:
+    """Hesaptaki TÜM orijinal videoları EN YÜKSEK kalitede bir kez indirip
+    kütüphaneye koyar. Zaten kütüphanede olanlara dokunmaz."""
+    posted_ids = set(state.get("_posted_ids", []))
+    lib = library_list()
     originals = [v for v in videos if v["id"] not in posted_ids]
-    missing = [v for v in originals if v["id"] not in cached]
+    todo = [v for v in originals if v["id"] not in lib]
     log(
-        f"Kütüphane: {len(originals)} orijinal videonun {len(originals) - len(missing)} tanesi "
-        f"zaten kütüphanede, {len(missing)} tanesi indirilecek."
+        f"Kütüphane: {len(originals)} orijinal videonun {len(originals) - len(todo)} tanesi zaten "
+        f"kütüphanede, {len(todo)} tanesi en yüksek kalitede indirilecek."
     )
     failed = []
-    for i, v in enumerate(missing, 1):
-        data = fetch_video_bytes(v)
-        if not data:
+    for i, v in enumerate(todo, 1):
+        data, info = _fetch_best_with_info(v)
+        if not data or not library_put(v["id"], data):
             failed.append(v["id"])
-            continue
-        upload_source(v["id"], data)
-        cached[v["id"]] = len(data)
-        log(f"  [{i}/{len(missing)}] {v['id']} kütüphaneye eklendi ({len(data) / 1e6:.1f} MB).")
+        else:
+            log(
+                f"  [{i}/{len(todo)}] {v['id']} kütüphaneye eklendi "
+                f"({_fmt_info(info)}, {len(data) / 1e6:.1f} MB)."
+            )
         # Instagram'a art arda seri istek atmamak için kısa, rastgele ara.
         time.sleep(random.uniform(3, 8))
-    total_mb = sum(cached.values()) / 1e6
+    total_mb = sum(a["size"] for a in lib.values()) / 1e6
     log(
-        f"Kütüphane güncel: {len(cached)} video, toplam {total_mb:.0f} MB. "
-        f"İndirilemeyen: {len(failed)}{' (' + ', '.join(failed) + ')' if failed else ''}."
+        f"Kütüphane güncel: {len(lib)} video, toplam {total_mb:.0f} MB. İndirilemeyen: {len(failed)}"
+        f"{' (' + ', '.join(failed) + ')' if failed else ''}."
     )
-    if total_mb > 850:
-        log("UYARI: kütüphane Supabase ücretsiz planın 1 GB depolama sınırına yaklaşıyor.")
+    _cleanup_legacy_supabase_sources(set(lib))
 
 
 def cleanup_old_videos(max_age_hours: int = 24) -> None:
@@ -611,6 +689,77 @@ def fetch_video_bytes(candidate: dict) -> Optional[bytes]:
 
     log(f"UYARI: {candidate['id']} için hiçbir yöntemle video indirilemedi.")
     return None
+
+
+def _probe_info(src: str) -> Optional[dict]:
+    """Dosya yolu ya da URL için {"w", "h", "dur"} döndürür."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height:format=duration", "-of", "json", src],
+            capture_output=True, text=True, timeout=60,
+        )
+        j = json.loads(r.stdout)
+        st = j["streams"][0]
+        return {"w": int(st["width"]), "h": int(st["height"]), "dur": float(j["format"]["duration"])}
+    except Exception:
+        return None
+
+
+def _probe_bytes_info(data: bytes) -> Optional[dict]:
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+        f.write(data)
+        f.flush()
+        return _probe_info(f.name)
+
+
+def _fmt_info(info: Optional[dict]) -> str:
+    return f"{info['w']}x{info['h']}, {info['dur']:.1f} sn" if info else "?"
+
+
+def _fetch_best_with_info(candidate: dict) -> tuple:
+    """Videonun Instagram'da OYNATILAN sürümünün en yüksek kalitesini
+    (bytes, info) olarak döndürür.
+
+    İki kaynak var:
+    - Graph API'nin media_url'i: çoğu videoda düşük/orta kalite (360p/720p)
+      veriyor; üstelik bazı videolarda yüklenen HAM dosyayı veriyor — ör.
+      Instagram'da sonu kırpılmış bir videonun kırpılmamış hali (sonunda
+      CapCut kapanışı duran sürüm).
+    - Sayfadaki DASH manifesti: Instagram'ın gerçekten oynattığı sürüm,
+      tüm kalite seviyeleriyle (1080x1920'ye kadar en iyisini seçiyoruz).
+
+    Süreleri 1 saniyeden fazla farklıysa media_url'deki kırpılmamış hal
+    demektir, DASH sürümü kullanılır. Süreler aynıysa çözünürlüğü yüksek
+    olan seçilir."""
+    mu = dash = None
+    if candidate.get("media_url"):
+        b = _download_bytes(candidate["media_url"])
+        if b:
+            mu = (b, _probe_bytes_info(b))
+    if candidate.get("permalink"):
+        b = _fetch_video_bytes_via_browser(candidate["permalink"])
+        if b:
+            dash = (b, _probe_bytes_info(b))
+
+    if mu and dash and mu[1] and dash[1]:
+        if abs(mu[1]["dur"] - dash[1]["dur"]) > 1.0:
+            log(
+                f"  {candidate['id']}: media_url sürümü ({_fmt_info(mu[1])}) ile Instagram'da oynatılan "
+                f"sürüm ({_fmt_info(dash[1])}) farklı uzunlukta — oynatılan sürüm kullanılıyor."
+            )
+            return dash
+        return max((mu, dash), key=lambda o: (o[1]["w"] * o[1]["h"], len(o[0])))
+    if dash:
+        return dash
+    if mu:
+        return mu
+    b = fetch_video_bytes(candidate)  # son çare: eski zincir (HTML yolu dahil)
+    return (b, _probe_bytes_info(b)) if b else (None, None)
+
+
+def fetch_video_bytes_best(candidate: dict) -> Optional[bytes]:
+    return _fetch_best_with_info(candidate)[0]
 
 
 def create_media_container(video_url: str, caption: str, trial: bool = False) -> str:
@@ -964,7 +1113,7 @@ def _run() -> None:
 
     if os.environ.get("SYNC_LIBRARY", "false").strip().lower() in ("1", "true", "yes"):
         # Bakım komutu: tüm videoları kütüphaneye indirir, paylaşım yapmaz.
-        sync_library(fetch_own_videos(), posted_ids)
+        sync_library(fetch_own_videos(), state)
         return
 
     daily = state.get("_daily", {})
