@@ -43,9 +43,67 @@ on:
         type: string
         default: "1"
 
+# Tüm işler aynı ayarları kullanır.
+env:
+  IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+  IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  SUPABASE_BUCKET: insta-repost
+  GITHUB_TOKEN: ${{ github.token }}
+  CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
+  MAX_REPOSTS_PER_VIDEO: "1"
+  # Günlük hedef script içinde her gün rastgele 4-6 seçiliyor
+  # (DAILY_TARGET_RANGE); bu, elle tetiklemeler dahil asla
+  # aşılmayacak SERT tavan. (Eskiden ~25/gün paylaşıyorduk, Instagram
+  # "otomatik davranış" uyarısı verdi.)
+  DAILY_PUBLISH_LIMIT: "6"
+  DRY_RUN: ${{ inputs.dry_run }}
+  MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
+  MIN_VIEW_COUNT: "0"
+  RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
+  TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
+  SYNC_LIBRARY: ${{ inputs.sync_library || 'false' }}
+  # Dış zamanlayıcının çağrılarında "auto" gönderilir (script kendi
+  # kendine karar verir); elle test ederken varsayılan "1"dir,
+  # istenirse sabit bir sayı da girilebilir.
+  POSTS_PER_RUN: ${{ inputs.posts_per_run }}
+  # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
+  # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
+  # bastırılıyor, deneme modu bunu aşmanın yolu).
+  TRIAL_REEL: "true"
+
 jobs:
-  repost:
+  # ÖNEMLİ (Actions dakika kotası): repo private olduğu için her iş, süresi
+  # yukarı yuvarlanarak dakika kotasından düşüyor. Dış zamanlayıcı günde ~56
+  # kez tetikliyor ama yalnızca 4-6 tanesinde paylaşım yapılıyor; bu yüzden
+  # önce bu hafif "gate" işi (~15 sn) paylaşım gerekip gerekmediğine karar
+  # veriyor, ağır kurulum (ffmpeg vb.) yalnızca gerekiyorsa çalışıyor.
+  gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      post: ${{ steps.gate.outputs.post }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Paylaşım zamanı mı?
+        id: gate
+        env:
+          GATE_ONLY: "true"
+        run: |
+          pip install --quiet requests
+          python scripts/repost.py
+
+  repost:
+    needs: gate
+    if: needs.gate.outputs.post == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     # Video kütüphanesi bu reponun "video-library" release'inde tutuluyor;
     # dosya ekleyebilmek için yazma izni gerekiyor.
     permissions:
@@ -56,6 +114,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: ffmpeg ve font kur
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
@@ -63,36 +122,7 @@ jobs:
       - name: Bağımlılıkları yükle
         run: pip install -r requirements.txt
 
-      - name: Headless tarayıcı kur (media_url eksik videolar için yedek indirme)
-        run: playwright install --with-deps chromium
-
+      # Headless tarayıcı (Chromium) artık burada peşin kurulmuyor; yalnızca
+      # kütüphanede olmayan yeni bir video indirilecekse script o an kuruyor.
       - name: Repost script'ini çalıştır
-        env:
-          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SUPABASE_BUCKET: insta-repost
-          GITHUB_TOKEN: ${{ github.token }}
-          CAPTION_SUFFIX: ${{ vars.CAPTION_SUFFIX }}
-          MAX_REPOSTS_PER_VIDEO: "1"
-          # Günlük hedef script içinde her gün rastgele 4-6 seçiliyor
-          # (DAILY_TARGET_RANGE); bu, elle tetiklemeler dahil asla
-          # aşılmayacak SERT tavan. (Eskiden ~25/gün paylaşıyorduk, Instagram
-          # "otomatik davranış" uyarısı verdi.)
-          DAILY_PUBLISH_LIMIT: "6"
-          DRY_RUN: ${{ inputs.dry_run }}
-          MEDIA_SELECTION: ${{ inputs.media_selection || 'top_viewed_cycle' }}
-          MIN_VIEW_COUNT: "0"
-          RESET_CYCLE: ${{ inputs.reset_cycle || 'false' }}
-          TARGET_MEDIA_ID: ${{ inputs.target_media_id || '' }}
-          SYNC_LIBRARY: ${{ inputs.sync_library || 'false' }}
-          # Dış zamanlayıcının çağrılarında "auto" gönderilir (script kendi
-          # kendine karar verir); elle test ederken varsayılan "1"dir,
-          # istenirse sabit bir sayı da girilebilir.
-          POSTS_PER_RUN: ${{ inputs.posts_per_run }}
-          # Bu proje kasıtlı olarak HER ZAMAN Deneme Reels olarak paylaşır,
-          # normal paylaşım hiç yapılmaz (özgün olmayan içerik Instagram'da
-          # bastırılıyor, deneme modu bunu aşmanın yolu).
-          TRIAL_REEL: "true"
         run: python scripts/repost.py

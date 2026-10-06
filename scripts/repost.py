@@ -618,7 +618,20 @@ def _fetch_video_bytes_via_browser(permalink: str) -> Optional[bytes]:
     html = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            try:
+                browser = p.chromium.launch()
+            except Exception as exc:
+                if "Executable doesn't exist" not in str(exc):
+                    raise
+                # Tarayıcı artık her çalıştırmada peşin kurulmuyor (Actions
+                # dakikası harcıyordu; videolar zaten kütüphanede) — yalnızca
+                # gerçekten gerektiğinde, o an kuruluyor.
+                log("Headless tarayıcı kurulu değil, şimdi kuruluyor...")
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                    check=True,
+                )
+                browser = p.chromium.launch()
             page = browser.new_page(user_agent=_BROWSER_HEADERS["User-Agent"])
             try:
                 page.goto(permalink, timeout=30000, wait_until="domcontentloaded")
@@ -1049,16 +1062,58 @@ def _decide_auto_batch_size(daily: dict) -> int:
     return 1
 
 
-JITTER_MAX_SECONDS = 600  # 10 dakika
+JITTER_MAX_SECONDS = 240  # 4 dakika
+
+
+def _load_daily(state: dict) -> dict:
+    daily = state.get("_daily", {})
+    # Runner UTC'de çalışıyor; gün sınırı Türkiye saatine göre olmalı.
+    today = _tr_now().date().isoformat()
+    if daily.get("date") != today:
+        # Dünün saatlerini sakla ki bugünün planı onlara yakın düşmesin.
+        daily = {"date": today, "count": 0, "prev_slots": daily.get("slots", [])}
+    return daily
+
+
+def _gate() -> bool:
+    """Ucuz ön kontrol (workflow'un "gate" işi): şu an paylaşım yapılacak mı?
+
+    Dış zamanlayıcı 15 dakikada bir tetikliyor ama günde yalnızca 4-6
+    tetiklemede gerçekten paylaşım yapılıyor. Eskiden her tetiklemede ffmpeg/
+    bağımlılık kurulumu + rastgele bekleme yapılıyordu (~6 dk/çalıştırma) ve
+    private repo'nun aylık 2000 dakikalık ücretsiz Actions kotası 5 günde
+    bitiyordu. Artık karar bu hafif adımda veriliyor; ağır kurulum yalnızca
+    gerçekten paylaşım yapılacaksa çalışıyor."""
+    if os.environ.get("POSTS_PER_RUN", "1").strip().lower() != "auto":
+        return True  # elle tetikleme / bakım komutları her zaman çalışır
+    if not acquire_lock(timeout_s=45):
+        log("Başka bir çalıştırma sürüyor (kilit alınamadı), bu yoklama atlanıyor.")
+        return False
+    try:
+        state = load_state()
+        daily = _load_daily(state)
+        n = _decide_auto_batch_size(daily)
+        state["_daily"] = daily  # günün planı ilk yoklamada burada yazılır
+        save_state(state)
+    finally:
+        release_lock()
+    log("Planlı paylaşım saati geldi, paylaşım işi başlatılıyor." if n else "Bu yoklamada paylaşım yok.")
+    return n > 0
 
 
 def main() -> None:
-    # Dış zamanlayıcı sabit bir kadansla (ör. her 30 dakikada bir) tetikliyor.
-    # Bu tetikleme Instagram'a hiç görünmüyor (yoklama atlanırsa Instagram'a
-    # hiçbir istek gitmiyor) — ama ek bir önlem olarak, gerçek paylaşım işini
-    # tetikleme anından da koparmak için burada rastgele bir bekleme
-    # uyguluyoruz. Böylece gerçek paylaşım anları tetikleyicinin sabit
-    # ızgarasına (ör. tam :00/:30) hiç denk gelmiyor.
+    if os.environ.get("GATE_ONLY", "false").strip().lower() in ("1", "true", "yes"):
+        post = _gate()
+        out = os.environ.get("GITHUB_OUTPUT")
+        if out:
+            with open(out, "a") as f:
+                f.write(f"post={'true' if post else 'false'}\n")
+        return
+
+    # Dış zamanlayıcı sabit bir kadansla (15 dakikada bir) tetikliyor; gerçek
+    # paylaşım anları bu sabit ızgaraya (:03/:18/:33/:48) denk gelmesin diye
+    # paylaşımdan önce kısa, rastgele bir bekleme uyguluyoruz. (Bekleme de
+    # Actions dakikası harcadığı için kısa tutuluyor.)
     if os.environ.get("POSTS_PER_RUN", "").strip().lower() == "auto":
         jitter = random.uniform(0, JITTER_MAX_SECONDS)
         log(f"Tetikleme kadansını bulanıklaştırmak için {jitter:.0f} saniye bekleniyor.")
@@ -1116,12 +1171,7 @@ def _run() -> None:
         sync_library(fetch_own_videos(), state)
         return
 
-    daily = state.get("_daily", {})
-    # Runner UTC'de çalışıyor; gün sınırı Türkiye saatine göre olmalı.
-    today = _tr_now().date().isoformat()
-    if daily.get("date") != today:
-        # Dünün saatlerini sakla ki bugünün planı onlara yakın düşmesin.
-        daily = {"date": today, "count": 0, "prev_slots": daily.get("slots", [])}
+    daily = _load_daily(state)
 
     # POSTS_PER_RUN="auto" (dış zamanlayıcının kullandığı mod): script her
     # "yoklama" çağrısında KENDİSİ karar veriyor — şimdi paylaşım yapsın mı,
